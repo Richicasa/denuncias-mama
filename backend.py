@@ -157,7 +157,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             await page.wait_for_function("document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=8000)
         except Exception:
             await page.wait_for_timeout(1500)
-        # 178 = QUITO (185 era Puerto Quito)
         await page.select_option("#cantonDomicilio", label="QUITO")
         await page.fill("#direccionDomicilio", dir_domicilio)
         
@@ -167,7 +166,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             await page.wait_for_function("document.querySelectorAll('#cantonExtravio option').length > 1", timeout=8000)
         except Exception:
             await page.wait_for_timeout(1500)
-        # 178 = QUITO
         await page.select_option("#cantonExtravio", label="QUITO")
         await page.fill("#direccionCircunstancia", dir_circunstancia)
         
@@ -185,7 +183,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         
         # 5. Agregar documento Cédula
         add_btn = page.locator('input[value="+ Agregar un nuevo documento"]')
-        await add_btn.click()
+        await add_btn.click(force=True)
         await page.wait_for_timeout(1500)
         
         await page.evaluate("if (window.RichFaces && RichFaces.$('frmPopups:createPane')) RichFaces.$('frmPopups:createPane').show();")
@@ -197,8 +195,18 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await page.fill('textarea[id*="descripcionNew"]', "cédula de identidad")
         
         accept_doc_btn = page.locator('#frmPopups\\:createPane input[value="Aceptar"]')
-        await accept_doc_btn.click()
-        await page.wait_for_timeout(2500)
+        await accept_doc_btn.click(force=True)
+        await page.wait_for_timeout(2000)
+        
+        # Limpieza forzada de cualquier shade/overlay residual de la ventana modal
+        await page.evaluate("""
+            if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
+                RichFaces.$('frmPopups:createPane').hide();
+            }
+            const shade = document.getElementById('frmPopups:createPane_shade');
+            if (shade) shade.remove();
+        """)
+        await page.wait_for_timeout(1000)
         
         # 6. Intentar resolver el Captcha automáticamente (hasta 4 intentos)
         max_attempts = 4
@@ -222,8 +230,13 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 
             print(f"[Intento {attempt+1}] Enviando código OCR: '{auto_code}'")
             await page.fill("#captchaTxt", auto_code)
-            await page.click("#j_idt170")
-            await page.wait_for_timeout(2500)
+            
+            # Clic inmune a bloqueos con JavaScript directo
+            await page.evaluate("""
+                const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
+                if (btn) btn.click();
+            """)
+            await page.wait_for_timeout(3000)
             
             confirm_modal_visible = await page.evaluate("""
                 (function() {
@@ -331,8 +344,11 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
     
     try:
         await page.fill("#captchaTxt", captcha_text)
-        await page.click("#j_idt170")
-        await page.wait_for_timeout(2500)
+        await page.evaluate("""
+            const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
+            if (btn) btn.click();
+        """)
+        await page.wait_for_timeout(3000)
         
         confirm_modal_visible = await page.evaluate("""
             (function() {
