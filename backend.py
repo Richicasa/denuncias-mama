@@ -19,7 +19,7 @@ try:
 except ImportError:
     pytesseract = None
 
-app = FastAPI(title="Denuncias de Extravío de Documentos - Ultra Rápido")
+app = FastAPI(title="Denuncias de Extravío de Documentos - 100% Automático")
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,38 +36,15 @@ os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 playwright_instance = None
 browser_instance: Browser = None
 
-CHROMIUM_ARGS = [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-accelerated-2d-canvas",
-    "--no-first-run",
-    "--no-zygote",
-    "--single-process",
-    "--disable-gpu",
-    "--disable-background-networking",
-    "--disable-background-timer-throttling",
-    "--disable-backgrounding-occluded-windows",
-    "--disable-breakpad",
-    "--disable-component-extensions-with-background-pages",
-    "--disable-extensions",
-    "--disable-features=TranslateUI,BlinkGenPropertyTrees",
-    "--disable-ipc-flooding-protection",
-    "--disable-renderer-backgrounding",
-    "--enable-features=NetworkService,NetworkServiceInProcess",
-    "--force-color-profile=srgb",
-    "--mute-audio"
-]
-
 @app.on_event("startup")
 async def startup_event():
     global playwright_instance, browser_instance
     playwright_instance = await async_playwright().start()
     browser_instance = await playwright_instance.chromium.launch(
         headless=True,
-        args=CHROMIUM_ARGS
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     )
-    print("🚀 Motor de navegación optimizado de alto rendimiento iniciado.")
+    print("🚀 Motor de navegación iniciado y listo.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -107,7 +84,9 @@ def solve_captcha_image(image_bytes: bytes) -> str:
             img,
             config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         ).strip()
-        return re.sub(r'[^A-Za-z0-9]', '', text)
+        cleaned = re.sub(r'[^A-Za-z0-9]', '', text)
+        print(f"[OCR] Código leído: '{cleaned}'")
+        return cleaned
     except Exception as e:
         print(f"[OCR Error] {e}")
         return ""
@@ -123,7 +102,6 @@ class SubmitManualCaptchaRequest(BaseModel):
     session_id: str
     captcha_text: str
 
-# Endpoints de salud compatibles con GET, HEAD, POST y OPTIONS para UptimeRobot
 @app.api_route("/health", methods=["GET", "HEAD", "POST", "OPTIONS"])
 @app.api_route("/ping", methods=["GET", "HEAD", "POST", "OPTIONS"])
 async def ping(request: Request):
@@ -159,42 +137,35 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
     )
     page = await context.new_page()
     
-    # Bloquear recursos pesados innecesarios
-    async def route_interceptor(route, request):
-        if request.resource_type in ["media", "font"]:
-            await route.abort()
-        elif request.resource_type == "image" and "captcha" not in request.url.lower():
-            await route.abort()
-        else:
-            await route.continue_()
-            
-    await page.route("**/*", route_interceptor)
-    
     try:
-        await page.goto(
-            "https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf",
-            timeout=35000,
-            wait_until="domcontentloaded"
-        )
+        print(f"Cargando portal judicial para cédula {cedula}...")
+        await page.goto("https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf", timeout=45000)
+        await page.wait_for_load_state("networkidle")
         
         # 1. Cédula
         await page.fill("#numeroIdentificacion", cedula)
         await page.locator("#numeroIdentificacion").blur()
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(2000)
         
         nombre = await page.input_value("#nombreCompleto")
         if not nombre:
             nombre = "CIUDADANO REGISTRADO"
             
-        # 2. Domicilio
+        # 2. Domicilio (Pichincha -> Quito -> Domicilio redactado)
         await page.select_option("#provinciaDomicilio", value="17")
-        await page.wait_for_timeout(600)
+        try:
+            await page.wait_for_function("document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=8000)
+        except Exception:
+            await page.wait_for_timeout(1500)
         await page.select_option("#cantonDomicilio", value="185")
         await page.fill("#direccionDomicilio", dir_domicilio)
         
-        # 3. Extravío
+        # 3. Extravío (Pichincha -> Quito -> Circunstancia redactada)
         await page.select_option("#provinciaExtravio", value="17")
-        await page.wait_for_timeout(600)
+        try:
+            await page.wait_for_function("document.querySelectorAll('#cantonExtravio option').length > 1", timeout=8000)
+        except Exception:
+            await page.wait_for_timeout(1500)
         await page.select_option("#cantonExtravio", value="185")
         await page.fill("#direccionCircunstancia", dir_circunstancia)
         
@@ -213,21 +184,21 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         # 5. Agregar documento Cédula
         add_btn = page.locator('input[value="+ Agregar un nuevo documento"]')
         await add_btn.click()
-        await page.wait_for_timeout(600)
+        await page.wait_for_timeout(1500)
         
         await page.evaluate("if (window.RichFaces && RichFaces.$('frmPopups:createPane')) RichFaces.$('frmPopups:createPane').show();")
-        await page.wait_for_timeout(300)
+        await page.wait_for_timeout(800)
         
         await page.select_option('select[id*="tipoDocumentoExtraviadoNewSelect"]', value="7")
-        await page.wait_for_timeout(300)
+        await page.wait_for_timeout(800)
         await page.fill('input[id*="numeroNew"]', cedula)
         await page.fill('textarea[id*="descripcionNew"]', "cédula de identidad")
         
         accept_doc_btn = page.locator('#frmPopups\\:createPane input[value="Aceptar"]')
         await accept_doc_btn.click()
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(2500)
         
-        # 6. Intentar resolver el Captcha automáticamente
+        # 6. Intentar resolver el Captcha automáticamente (hasta 4 intentos)
         max_attempts = 4
         solved_successfully = False
         last_captcha_b64 = ""
@@ -242,33 +213,38 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             
             auto_code = solve_captcha_image(captcha_bytes)
             if not auto_code or len(auto_code) < 4:
+                print(f"[Intento {attempt+1}] Captcha dudoso, refrescando...")
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
-                await page.wait_for_timeout(800)
+                await page.wait_for_timeout(1500)
                 continue
                 
+            print(f"[Intento {attempt+1}] Enviando código OCR: '{auto_code}'")
             await page.fill("#captchaTxt", auto_code)
             await page.click("#j_idt170")
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(2500)
             
             confirm_modal_visible = await page.evaluate("""
                 (function() {
                     const modal = document.getElementById('frmPopups:confirmForm');
                     const container = document.getElementById('frmPopups:confirmForm_container');
-                    if (modal && modal.style.visibility !== 'hidden') return true;
+                    if (modal && modal.style.visibility !== 'hidden' && modal.style.display !== 'none') return true;
                     if (container && container.style.visibility !== 'hidden' && container.style.display !== 'none') return true;
                     return false;
                 })()
             """)
             
             if confirm_modal_visible:
+                print(f"[Intento {attempt+1}] ¡Captcha verificado exitosamente!")
                 solved_successfully = True
                 break
             else:
+                print(f"[Intento {attempt+1}] Captcha no válido para la Judicatura, refrescando...")
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
-                await page.wait_for_timeout(800)
+                await page.wait_for_timeout(1500)
                 
         # 7. Confirmar y Descargar PDF
         if solved_successfully:
+            print("Confirmando modal de registro (clic en Si)...")
             await page.evaluate("""
                 if (window.si) {
                     window.si();
@@ -277,11 +253,12 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     if (siBtn) siBtn.click();
                 }
             """)
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(3000)
             
             pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
+            print("Descargando PDF oficial...")
             
-            async with page.expect_download(timeout=30000) as download_info:
+            async with page.expect_download(timeout=35000) as download_info:
                 await page.evaluate("""
                     const btn = document.querySelector('input[value="Ver formulario"]') || 
                                 document.querySelector('input[name*="j_idt242"]') ||
@@ -295,6 +272,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 """)
             download = await download_info.value
             await download.save_as(pdf_path)
+            print(f"PDF generado y guardado en: {pdf_path}")
             
             sessions[session_id] = {
                 "pdf_path": pdf_path,
@@ -352,13 +330,13 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
     try:
         await page.fill("#captchaTxt", captcha_text)
         await page.click("#j_idt170")
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(2500)
         
         confirm_modal_visible = await page.evaluate("""
             (function() {
                 const modal = document.getElementById('frmPopups:confirmForm');
                 const container = document.getElementById('frmPopups:confirmForm_container');
-                if (modal && modal.style.visibility !== 'hidden') return true;
+                if (modal && modal.style.visibility !== 'hidden' && modal.style.display !== 'none') return true;
                 if (container && container.style.visibility !== 'hidden' && container.style.display !== 'none') return true;
                 return false;
             })()
@@ -384,10 +362,10 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
                 if (siBtn) siBtn.click();
             }
         """)
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(3000)
         
         pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{session['cedula']}_{uuid.uuid4().hex[:6]}.pdf")
-        async with page.expect_download(timeout=30000) as download_info:
+        async with page.expect_download(timeout=35000) as download_info:
             await page.evaluate("""
                 const btn = document.querySelector('input[value="Ver formulario"]') || 
                             document.querySelector('input[name*="j_idt242"]') ||
@@ -430,7 +408,6 @@ async def download_pdf(session_id: str):
         filename=f"Denuncia_{session['cedula']}.pdf"
     )
 
-# Ruta principal compatible con HEAD, GET y OPTIONS para que UptimeRobot nunca dé 405
 @app.api_route("/", methods=["GET", "HEAD", "OPTIONS"])
 async def index(request: Request):
     html_file = os.path.join(os.path.dirname(__file__), "templates", "index.html")
