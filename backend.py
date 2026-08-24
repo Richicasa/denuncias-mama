@@ -12,13 +12,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from PIL import Image
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from text_cleaner import limpiar_y_corregir_sector
 
 try:
     import pytesseract
 except ImportError:
     pytesseract = None
 
-app = FastAPI(title="Denuncias de Extravío de Documentos - 100% Automático")
+app = FastAPI(title="Denuncias de Extravío de Documentos - Motor Gramatical y OCR")
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,20 +96,39 @@ class AutoDenunciaRequest(BaseModel):
     cedula: str
     sector: str
 
+class PreviewSectorRequest(BaseModel):
+    sector: str
+
 class SubmitManualCaptchaRequest(BaseModel):
     session_id: str
     captcha_text: str
 
+@app.post("/api/preview-sector")
+async def preview_sector(req: PreviewSectorRequest):
+    return limpiar_y_corregir_sector(req.sector)
+
 @app.post("/api/generar-denuncia-auto")
 async def generar_denuncia_auto(req: AutoDenunciaRequest):
     cedula = req.cedula.strip()
-    sector = req.sector.strip()
+    raw_sector = req.sector.strip()
     
     if not cedula or len(cedula) < 10:
         raise HTTPException(status_code=400, detail="Número de cédula inválido (10 dígitos)")
-    if not sector:
+    if not raw_sector:
         raise HTTPException(status_code=400, detail="Debe indicar el sector o lugar del extravío")
         
+    # Corrección ortográfica y redacción gramatical inteligente
+    sector_info = limpiar_y_corregir_sector(raw_sector)
+    sector_limpio = sector_info["sector_limpio"]
+    dir_domicilio = sector_info["direccion_domicilio"]
+    dir_circunstancia = sector_info["direccion_circunstancia"]
+    
+    print(f"--- NUEVA SOLICITUD ---")
+    print(f"Cédula: {cedula}")
+    print(f"Sector ingresado: '{raw_sector}' -> Corregido: '{sector_limpio}'")
+    print(f"Dirección Domicilio: '{dir_domicilio}'")
+    print(f"Dirección Extravío:  '{dir_circunstancia}'")
+    
     session_id = str(uuid.uuid4())
     context = await browser_instance.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -118,7 +138,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
     page = await context.new_page()
     
     try:
-        print(f"Iniciando trámite para cédula {cedula} en {sector}...")
         await page.goto("https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf", timeout=45000)
         await page.wait_for_load_state("networkidle")
         
@@ -131,17 +150,17 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         if not nombre:
             nombre = "CIUDADANO REGISTRADO"
             
-        # 2. Domicilio (Pichincha -> Quito -> Sector de [Sector])
+        # 2. Domicilio (Pichincha -> Quito -> Domicilio redactado)
         await page.select_option("#provinciaDomicilio", value="17")
         await page.wait_for_timeout(1500)
         await page.select_option("#cantonDomicilio", value="185")
-        await page.fill("#direccionDomicilio", f"Sector de {sector}")
+        await page.fill("#direccionDomicilio", dir_domicilio)
         
-        # 3. Extravío (Pichincha -> Quito -> Documento extraviado en el sector de [Sector])
+        # 3. Extravío (Pichincha -> Quito -> Circunstancia redactada)
         await page.select_option("#provinciaExtravio", value="17")
         await page.wait_for_timeout(1500)
         await page.select_option("#cantonExtravio", value="185")
-        await page.fill("#direccionCircunstancia", f"Documento extraviado en el sector de {sector}")
+        await page.fill("#direccionCircunstancia", dir_circunstancia)
         
         # 4. Fecha hábil anterior
         b_day = get_last_business_day()
@@ -172,7 +191,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await accept_doc_btn.click()
         await page.wait_for_timeout(2500)
         
-        # 6. Intentar resolver el Captcha automáticamente con verificación
+        # 6. Intentar resolver el Captcha automáticamente
         max_attempts = 4
         solved_successfully = False
         last_captcha_b64 = ""
@@ -194,10 +213,9 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 
             print(f"[Intento {attempt+1}] Probando código OCR: '{auto_code}'")
             await page.fill("#captchaTxt", auto_code)
-            await page.click("#j_idt170") # Aceptar
+            await page.click("#j_idt170")
             await page.wait_for_timeout(3000)
             
-            # Comprobar si apareció la ventana modal de confirmación
             confirm_modal_visible = await page.evaluate("""
                 (function() {
                     const modal = document.getElementById('frmPopups:confirmForm');
@@ -217,10 +235,9 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
                 await page.wait_for_timeout(2000)
                 
-        # 7. Si se resolvió con éxito:
+        # 7. Confirmar y Descargar PDF
         if solved_successfully:
-            # Confirmar registro (clic en 'Si')
-            print("Confirmando formulario en modal de la Judicatura...")
+            print("Confirmando formulario en la Judicatura...")
             await page.evaluate("""
                 if (window.si) {
                     window.si();
@@ -231,7 +248,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             """)
             await page.wait_for_timeout(3500)
             
-            # Descargar PDF directamente
             pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
             print("Descargando PDF oficial...")
             
@@ -254,7 +270,10 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             sessions[session_id] = {
                 "pdf_path": pdf_path,
                 "cedula": cedula,
-                "nombre": nombre
+                "nombre": nombre,
+                "sector_limpio": sector_limpio,
+                "dir_domicilio": dir_domicilio,
+                "dir_circunstancia": dir_circunstancia
             }
             await context.close()
             
@@ -262,15 +281,16 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 "success": True,
                 "downloadUrl": f"/api/download-pdf/{session_id}",
                 "cedula": cedula,
-                "nombre": nombre
+                "nombre": nombre,
+                "sectorCorregido": sector_limpio,
+                "circunstancia": dir_circunstancia
             }
             
-        # Fallback manual en caso de que los 4 intentos automáticos no pasen
         sessions[session_id] = {
             "context": context,
             "page": page,
             "cedula": cedula,
-            "sector": sector,
+            "sector": sector_limpio,
             "nombre": nombre,
             "fecha": formatted_date
         }
@@ -281,7 +301,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             "sessionId": session_id,
             "nombre": nombre,
             "fecha": formatted_date,
-            "sector": sector,
+            "sector": sector_limpio,
             "captchaImage": f"data:image/jpeg;base64,{last_captcha_b64}"
         }
         

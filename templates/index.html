@@ -35,19 +35,19 @@
           <p class="text-xs text-blue-100 font-medium">Extravío de Cédula (Consejo Judicatura)</p>
         </div>
       </div>
-      <span class="text-xs bg-emerald-500 text-white py-1 px-2.5 rounded-full font-bold shadow-sm">100% Automático</span>
+      <span class="text-xs bg-emerald-500 text-white py-1 px-2.5 rounded-full font-bold shadow-sm">Auto-Redacción ✨</span>
     </div>
   </header>
 
   <!-- Contenedor Principal -->
   <main class="flex-grow max-w-md mx-auto w-full p-5 flex flex-col justify-center">
 
-    <!-- PASO 1: Ingreso de Cédula y Sector -->
+    <!-- FORMULARIO DIRECTO -->
     <section id="step1" class="bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-5 transition-all duration-300">
       <div class="text-center">
         <span class="bg-blue-100 text-blue-700 font-bold text-xs uppercase px-3 py-1 rounded-full">Solo 2 Datos</span>
         <h2 class="text-2xl font-extrabold text-slate-800 mt-2">Generar Denuncia</h2>
-        <p class="text-sm text-slate-500 mt-1">El sistema llena todo y resuelve el captcha por ti</p>
+        <p class="text-sm text-slate-500 mt-1">Corrección gramatical y llenado 100% automático</p>
       </div>
 
       <form id="formStep1" onsubmit="handleGenerateAuto(event)" class="space-y-5">
@@ -79,20 +79,31 @@
             id="sectorInput"
             type="text"
             required
-            placeholder="Ej: La Magdalena, El Recreo..."
+            oninput="handleSectorInput(this.value)"
+            placeholder="Ej: El Recreo, La Magdalena..."
             class="touch-target w-full text-lg font-semibold px-4 border-2 border-slate-200 rounded-2xl focus:border-blue-600 focus:outline-none focus:ring-4 focus:ring-blue-100 transition"
           />
           
+          <!-- Vista previa en tiempo real de redacción -->
+          <div id="grammarBadge" class="hidden mt-2 p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-start space-x-2">
+            <span class="text-emerald-600 font-bold mt-0.5">✨</span>
+            <div>
+              <p class="font-bold">Redacción Oficial:</p>
+              <p id="grammarText" class="font-medium italic"></p>
+            </div>
+          </div>
+
           <!-- Botones rápidos de sectores comunes -->
           <div class="mt-2.5 flex flex-wrap gap-1.5">
-            <button type="button" onclick="setSector('La Magdalena')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-1.5 px-3 rounded-xl transition">La Magdalena</button>
             <button type="button" onclick="setSector('El Recreo')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-1.5 px-3 rounded-xl transition">El Recreo</button>
+            <button type="button" onclick="setSector('La Magdalena')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-1.5 px-3 rounded-xl transition">La Magdalena</button>
             <button type="button" onclick="setSector('Carapungo')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-1.5 px-3 rounded-xl transition">Carapungo</button>
             <button type="button" onclick="setSector('Centro Histórico')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-1.5 px-3 rounded-xl transition">Centro Histórico</button>
+            <button type="button" onclick="setSector('Quitumbe')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-1.5 px-3 rounded-xl transition">Quitumbe</button>
           </div>
         </div>
 
-        <!-- Botón de Envío 1 Clic -->
+        <!-- Botón de Envío -->
         <button
           id="btnSubmitStep1"
           type="submit"
@@ -112,11 +123,11 @@
         <div class="absolute inset-0 rounded-full border-4 border-emerald-200 animate-ping opacity-25"></div>
         <div class="w-16 h-16 rounded-full border-4 border-emerald-600 border-t-transparent animate-spin"></div>
       </div>
-      <h3 id="loadingTitle" class="text-xl font-extrabold text-slate-800">Procesando Denuncia...</h3>
-      <p id="loadingSubtitle" class="text-sm text-slate-500">Llenando datos oficiales y resolviendo código de seguridad...</p>
+      <h3 id="loadingTitle" class="text-xl font-extrabold text-slate-800">Generando Denuncia Oficial...</h3>
+      <p id="loadingSubtitle" class="text-sm text-slate-500">Corrigiendo ortografía, completando datos y resolviendo seguridad...</p>
     </section>
 
-    <!-- PASO FALLBACK: Captcha Manual (Solo si el auto-resolver lo solicita) -->
+    <!-- PASO FALLBACK: Captcha Manual (Si se requiere) -->
     <section id="stepCaptchaManual" class="hidden bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-5 transition-all duration-300">
       <div class="text-center">
         <span class="bg-amber-100 text-amber-700 font-bold text-xs uppercase px-3 py-1 rounded-full">Verificación Requerida</span>
@@ -124,7 +135,6 @@
         <p class="text-sm text-slate-500">Solo escribe las letras/números de la imagen</p>
       </div>
 
-      <!-- Imagen del Captcha -->
       <div class="bg-slate-100 p-4 rounded-2xl border-2 border-dashed border-slate-300 flex flex-col items-center justify-center space-y-2">
         <div class="bg-white p-2 rounded-xl shadow-inner border border-slate-200">
           <img id="manualCaptchaImage" src="" alt="Código Captcha" class="h-16 w-auto object-contain rounded-lg min-w-[140px]" />
@@ -153,7 +163,7 @@
       </form>
     </section>
 
-    <!-- PASO FINAL: Éxito y Descarga -->
+    <!-- PANTALLA DE ÉXITO Y DESCARGA -->
     <section id="stepSuccess" class="hidden bg-white rounded-3xl p-6 shadow-xl border border-slate-100 text-center space-y-6">
       <div class="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-inner">
         <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -162,14 +172,15 @@
       </div>
 
       <div>
-        <h2 class="text-2xl font-extrabold text-slate-800">¡Denuncia Generada con Éxito!</h2>
-        <p class="text-sm text-slate-600 mt-1">El formulario oficial ha sido registrado en el Consejo de la Judicatura.</p>
+        <h2 class="text-2xl font-extrabold text-slate-800">¡Denuncia Lista!</h2>
+        <p class="text-sm text-slate-600 mt-1">El formulario oficial ha sido generado y registrado.</p>
       </div>
 
-      <div class="bg-slate-50 p-4 rounded-2xl border border-slate-200 text-left text-sm space-y-1">
+      <div class="bg-slate-50 p-4 rounded-2xl border border-slate-200 text-left text-sm space-y-1.5">
         <p class="text-slate-500">Titular: <span id="finalNombre" class="font-bold text-slate-800"></span></p>
         <p class="text-slate-500">Cédula: <span id="finalCedula" class="font-bold text-slate-800"></span></p>
-        <p class="text-slate-500">Documento: <span class="font-bold text-slate-800">Cédula de Identidad</span></p>
+        <p class="text-slate-500">Lugar: <span id="finalSector" class="font-bold text-slate-800"></span></p>
+        <p class="text-xs text-slate-400 italic" id="finalCircunstancia"></p>
       </div>
 
       <div class="space-y-3">
@@ -199,16 +210,40 @@
 
   <!-- Pie de página -->
   <footer class="text-center py-3 text-xs text-slate-400">
-    Sistema de Asistencia Rápida para Trámites Judiciales Ecuador
+    Sistema Inteligente para Trámites Judiciales Ecuador
   </footer>
 
   <script>
     let currentSessionId = null;
+    let previewTimer = null;
 
     function setSector(name) {
       const input = document.getElementById('sectorInput');
       input.value = name;
+      handleSectorInput(name);
       input.focus();
+    }
+
+    function handleSectorInput(val) {
+      clearTimeout(previewTimer);
+      if (!val || val.trim().length < 2) {
+        document.getElementById('grammarBadge').classList.add('hidden');
+        return;
+      }
+      previewTimer = setTimeout(async () => {
+        try {
+          const res = await fetch('/api/preview-sector', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sector: val })
+          });
+          const data = await res.json();
+          if (data && data.direccion_circunstancia) {
+            document.getElementById('grammarText').innerText = `"${data.direccion_circunstancia}"`;
+            document.getElementById('grammarBadge').classList.remove('hidden');
+          }
+        } catch (e) {}
+      }, 250);
     }
 
     function showLoading(title, subtitle) {
@@ -231,6 +266,7 @@
       document.getElementById('step1').classList.remove('hidden');
       document.getElementById('cedulaInput').value = '';
       document.getElementById('sectorInput').value = '';
+      document.getElementById('grammarBadge').classList.add('hidden');
     }
 
     async function handleGenerateAuto(e) {
@@ -240,7 +276,7 @@
 
       if (!cedula || !sector) return;
 
-      showLoading('Generando Denuncia...', 'Llenando datos oficiales en Pichincha - Quito y resolviendo seguridad...');
+      showLoading('Generando Denuncia Oficial...', 'Corrigiendo ortografía, completando datos y resolviendo seguridad...');
 
       try {
         const response = await fetch('/api/generar-denuncia-auto', {
@@ -255,6 +291,9 @@
           hideLoading();
           document.getElementById('finalNombre').innerText = data.nombre;
           document.getElementById('finalCedula').innerText = data.cedula;
+          document.getElementById('finalSector').innerText = data.sectorCorregido || sector;
+          document.getElementById('finalCircunstancia').innerText = data.circunstancia || '';
+          
           const dlBtn = document.getElementById('btnDownloadPdf');
           dlBtn.href = data.downloadUrl;
           
