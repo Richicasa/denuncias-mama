@@ -6,7 +6,7 @@ import os
 import re
 import uuid
 from typing import Dict
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -36,7 +36,6 @@ os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 playwright_instance = None
 browser_instance: Browser = None
 
-# Flags de Chromium de alto rendimiento
 CHROMIUM_ARGS = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -124,11 +123,14 @@ class SubmitManualCaptchaRequest(BaseModel):
     session_id: str
     captcha_text: str
 
-# Endpoint ultra liviano para mantener Render despierto 24/7 (UptimeRobot / Cron)
-@app.get("/health")
-@app.get("/ping")
-async def ping():
-    return {"status": "ok", "uptime": "active", "time": datetime.datetime.now().isoformat()}
+# Endpoints de salud compatibles con GET, HEAD, POST y OPTIONS para UptimeRobot
+@app.api_route("/health", methods=["GET", "HEAD", "POST", "OPTIONS"])
+@app.api_route("/ping", methods=["GET", "HEAD", "POST", "OPTIONS"])
+async def ping(request: Request):
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ok", "uptime": "active", "time": datetime.datetime.now().isoformat()}
+    )
 
 @app.post("/api/preview-sector")
 async def preview_sector(req: PreviewSectorRequest):
@@ -157,8 +159,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
     )
     page = await context.new_page()
     
-    # ⚡ OPTIMIZACIÓN: Bloquear recursos pesados innecesarios (logos, gifs, fuentes externas pesadas)
-    # Permitiendo únicamente el script, css esencial y la imagen del captcha
+    # Bloquear recursos pesados innecesarios
     async def route_interceptor(route, request):
         if request.resource_type in ["media", "font"]:
             await route.abort()
@@ -170,7 +171,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
     await page.route("**/*", route_interceptor)
     
     try:
-        # Carga acelerada con domcontentloaded
         await page.goto(
             "https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf",
             timeout=35000,
@@ -186,13 +186,13 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         if not nombre:
             nombre = "CIUDADANO REGISTRADO"
             
-        # 2. Domicilio (Pichincha -> Quito -> Domicilio redactado)
+        # 2. Domicilio
         await page.select_option("#provinciaDomicilio", value="17")
         await page.wait_for_timeout(600)
         await page.select_option("#cantonDomicilio", value="185")
         await page.fill("#direccionDomicilio", dir_domicilio)
         
-        # 3. Extravío (Pichincha -> Quito -> Circunstancia redactada)
+        # 3. Extravío
         await page.select_option("#provinciaExtravio", value="17")
         await page.wait_for_timeout(600)
         await page.select_option("#cantonExtravio", value="185")
@@ -430,8 +430,9 @@ async def download_pdf(session_id: str):
         filename=f"Denuncia_{session['cedula']}.pdf"
     )
 
-@app.get("/")
-async def index():
+# Ruta principal compatible con HEAD, GET y OPTIONS para que UptimeRobot nunca dé 405
+@app.api_route("/", methods=["GET", "HEAD", "OPTIONS"])
+async def index(request: Request):
     html_file = os.path.join(os.path.dirname(__file__), "templates", "index.html")
     with open(html_file, "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
