@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Denuncia de Pérdida de Documentos - Asistente Rápido</title>
+  <title>Denuncia de Pérdida de Documentos - 100% Automático</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -35,7 +35,7 @@
           <p class="text-xs text-blue-100 font-medium">Extravío de Cédula (Consejo Judicatura)</p>
         </div>
       </div>
-      <span class="text-xs bg-blue-800 text-blue-200 py-1 px-2.5 rounded-full font-bold">Pichincha</span>
+      <span class="text-xs bg-emerald-500 text-white py-1 px-2.5 rounded-full font-bold shadow-sm">100% Automático</span>
     </div>
   </header>
 
@@ -43,14 +43,14 @@
   <main class="flex-grow max-w-md mx-auto w-full p-5 flex flex-col justify-center">
 
     <!-- PASO 1: Ingreso de Cédula y Sector -->
-    <section id="step1" class="bg-white rounded-3xl p-6 shadow-xl border border-slate-100 transition-all duration-300">
-      <div class="text-center mb-6">
-        <span class="bg-blue-100 text-blue-700 font-bold text-xs uppercase px-3 py-1 rounded-full">Paso 1 de 2</span>
-        <h2 class="text-2xl font-bold text-slate-800 mt-2">Solo 2 Datos</h2>
-        <p class="text-sm text-slate-500 mt-1">El resto se llena automáticamente</p>
+    <section id="step1" class="bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-5 transition-all duration-300">
+      <div class="text-center">
+        <span class="bg-blue-100 text-blue-700 font-bold text-xs uppercase px-3 py-1 rounded-full">Solo 2 Datos</span>
+        <h2 class="text-2xl font-extrabold text-slate-800 mt-2">Generar Denuncia</h2>
+        <p class="text-sm text-slate-500 mt-1">El sistema llena todo y resuelve el captcha por ti</p>
       </div>
 
-      <form id="formStep1" onsubmit="handleStartSession(event)" class="space-y-5">
+      <form id="formStep1" onsubmit="handleGenerateAuto(event)" class="space-y-5">
         <!-- Campo 1: Cédula -->
         <div>
           <label for="cedulaInput" class="block text-base font-bold text-slate-800 mb-1.5 flex items-center">
@@ -92,13 +92,13 @@
           </div>
         </div>
 
-        <!-- Botón de Envío Paso 1 -->
+        <!-- Botón de Envío 1 Clic -->
         <button
           id="btnSubmitStep1"
           type="submit"
-          class="touch-target w-full bg-blue-600 hover:bg-blue-700 active:scale-98 text-white text-lg font-extrabold rounded-2xl shadow-lg shadow-blue-500/30 flex items-center justify-center space-x-2 transition"
+          class="touch-target w-full bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white text-lg font-extrabold rounded-2xl shadow-lg shadow-emerald-600/30 flex items-center justify-center space-x-2 transition"
         >
-          <span>Preparar Formulario</span>
+          <span>Generar y Descargar PDF</span>
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
           </svg>
@@ -106,90 +106,55 @@
       </form>
     </section>
 
-    <!-- ESTADO DE CARGA -->
+    <!-- ESTADO DE CARGA AUTOMÁTICA -->
     <section id="loadingState" class="hidden bg-white rounded-3xl p-8 shadow-xl border border-slate-100 text-center space-y-4">
       <div class="relative w-16 h-16 mx-auto">
-        <div class="absolute inset-0 rounded-full border-4 border-blue-200 animate-ping opacity-25"></div>
-        <div class="w-16 h-16 rounded-full border-4 border-blue-600 border-t-transparent animate-spin"></div>
+        <div class="absolute inset-0 rounded-full border-4 border-emerald-200 animate-ping opacity-25"></div>
+        <div class="w-16 h-16 rounded-full border-4 border-emerald-600 border-t-transparent animate-spin"></div>
       </div>
-      <h3 id="loadingTitle" class="text-xl font-bold text-slate-800">Conectando con el portal oficial...</h3>
-      <p id="loadingSubtitle" class="text-sm text-slate-500">Completando datos de Registro Civil y domicilio en Pichincha - Quito</p>
+      <h3 id="loadingTitle" class="text-xl font-extrabold text-slate-800">Procesando Denuncia...</h3>
+      <p id="loadingSubtitle" class="text-sm text-slate-500">Llenando datos oficiales y resolviendo código de seguridad...</p>
     </section>
 
-    <!-- PASO 2: Escribir el Captcha -->
-    <section id="step2" class="hidden bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-5 transition-all duration-300">
+    <!-- PASO FALLBACK: Captcha Manual (Solo si el auto-resolver lo solicita) -->
+    <section id="stepCaptchaManual" class="hidden bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-5 transition-all duration-300">
       <div class="text-center">
-        <span class="bg-emerald-100 text-emerald-700 font-bold text-xs uppercase px-3 py-1 rounded-full">Paso Final</span>
+        <span class="bg-amber-100 text-amber-700 font-bold text-xs uppercase px-3 py-1 rounded-full">Verificación Requerida</span>
         <h2 class="text-2xl font-bold text-slate-800 mt-2">Escribe el Código</h2>
-        <p class="text-sm text-slate-500">Mira la imagen y escribe las letras/números</p>
-      </div>
-
-      <!-- Resumen detectado -->
-      <div class="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80 space-y-1">
-        <div class="flex items-center space-x-2">
-          <span class="text-lg">👤</span>
-          <p id="detectedName" class="text-sm font-bold text-slate-800 truncate">Consultando nombres...</p>
-        </div>
-        <div class="flex items-center justify-between text-xs text-slate-500 font-medium pl-7">
-          <span id="detectedLossDate">Fecha: ...</span>
-          <span id="detectedSector">Sector: ...</span>
-        </div>
+        <p class="text-sm text-slate-500">Solo escribe las letras/números de la imagen</p>
       </div>
 
       <!-- Imagen del Captcha -->
       <div class="bg-slate-100 p-4 rounded-2xl border-2 border-dashed border-slate-300 flex flex-col items-center justify-center space-y-2">
         <div class="bg-white p-2 rounded-xl shadow-inner border border-slate-200">
-          <img id="captchaImage" src="" alt="Código Captcha" class="h-16 w-auto object-contain rounded-lg min-w-[140px]" />
+          <img id="manualCaptchaImage" src="" alt="Código Captcha" class="h-16 w-auto object-contain rounded-lg min-w-[140px]" />
         </div>
-        <button type="button" onclick="handleRefreshCaptcha()" class="text-xs text-blue-600 hover:text-blue-800 font-bold flex items-center space-x-1 py-1 px-2.5 rounded-lg hover:bg-blue-50 transition">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-          </svg>
-          <span>¿No se entiende? Cambiar imagen</span>
-        </button>
       </div>
 
-      <!-- Input de Captcha -->
-      <form id="formStep2" onsubmit="handleSubmitCaptcha(event)" class="space-y-4">
+      <form id="formManualCaptcha" onsubmit="handleSubmitManualCaptcha(event)" class="space-y-4">
         <div>
-          <label for="captchaInput" class="block text-sm font-bold text-slate-700 mb-1">
-            Escribe el código exactamente como se ve:
-          </label>
           <input
-            id="captchaInput"
+            id="manualCaptchaInput"
             type="text"
             required
             autocomplete="off"
-            autocorrect="off"
-            autocapitalize="off"
-            spellcheck="false"
             placeholder="Código aquí"
             class="touch-target w-full text-2xl font-black tracking-widest text-center uppercase px-4 border-2 border-emerald-500 rounded-2xl focus:outline-none focus:ring-4 focus:ring-emerald-100 bg-emerald-50/30"
           />
         </div>
+        <div id="manualCaptchaError" class="hidden bg-rose-50 text-rose-700 p-3 rounded-xl text-sm font-medium border border-rose-200 text-center"></div>
 
-        <div id="captchaError" class="hidden bg-rose-50 text-rose-700 p-3 rounded-xl text-sm font-medium border border-rose-200 text-center"></div>
-
-        <!-- Botón Final de Descarga -->
         <button
-          id="btnSubmitCaptcha"
           type="submit"
-          class="touch-target w-full bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white text-lg font-extrabold rounded-2xl shadow-lg shadow-emerald-600/30 flex items-center justify-center space-x-2 transition"
+          class="touch-target w-full bg-emerald-600 hover:bg-emerald-700 text-white text-lg font-extrabold rounded-2xl shadow-lg shadow-emerald-600/30 flex items-center justify-center space-x-2 transition"
         >
-          <span>Generar y Descargar PDF</span>
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
-          </svg>
-        </button>
-
-        <button type="button" onclick="resetToStep1()" class="w-full text-center text-sm font-semibold text-slate-500 hover:text-slate-700 py-2">
-          ← Volver a cambiar cédula o sector
+          <span>Continuar y Descargar PDF</span>
         </button>
       </form>
     </section>
 
-    <!-- PASO 3: Éxito y Descarga -->
-    <section id="step3" class="hidden bg-white rounded-3xl p-6 shadow-xl border border-slate-100 text-center space-y-6">
+    <!-- PASO FINAL: Éxito y Descarga -->
+    <section id="stepSuccess" class="hidden bg-white rounded-3xl p-6 shadow-xl border border-slate-100 text-center space-y-6">
       <div class="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-inner">
         <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path>
@@ -197,8 +162,8 @@
       </div>
 
       <div>
-        <h2 class="text-2xl font-extrabold text-slate-800">¡Denuncia Registrada!</h2>
-        <p class="text-sm text-slate-600 mt-1">El formulario oficial del Consejo de la Judicatura ha sido generado.</p>
+        <h2 class="text-2xl font-extrabold text-slate-800">¡Denuncia Generada con Éxito!</h2>
+        <p class="text-sm text-slate-600 mt-1">El formulario oficial ha sido registrado en el Consejo de la Judicatura.</p>
       </div>
 
       <div class="bg-slate-50 p-4 rounded-2xl border border-slate-200 text-left text-sm space-y-1">
@@ -222,7 +187,7 @@
 
         <button
           type="button"
-          onclick="resetToStep1()"
+          onclick="resetForm()"
           class="touch-target w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-2xl transition text-base"
         >
           Hacer otra denuncia
@@ -237,7 +202,6 @@
     Sistema de Asistencia Rápida para Trámites Judiciales Ecuador
   </footer>
 
-  <!-- Lógica JavaScript -->
   <script>
     let currentSessionId = null;
 
@@ -249,8 +213,8 @@
 
     function showLoading(title, subtitle) {
       document.getElementById('step1').classList.add('hidden');
-      document.getElementById('step2').classList.add('hidden');
-      document.getElementById('step3').classList.add('hidden');
+      document.getElementById('stepCaptchaManual').classList.add('hidden');
+      document.getElementById('stepSuccess').classList.add('hidden');
       document.getElementById('loadingTitle').innerText = title;
       document.getElementById('loadingSubtitle').innerText = subtitle;
       document.getElementById('loadingState').classList.remove('hidden');
@@ -260,94 +224,29 @@
       document.getElementById('loadingState').classList.add('hidden');
     }
 
-    function resetToStep1() {
-      document.getElementById('step2').classList.add('hidden');
-      document.getElementById('step3').classList.add('hidden');
+    function resetForm() {
+      document.getElementById('stepCaptchaManual').classList.add('hidden');
+      document.getElementById('stepSuccess').classList.add('hidden');
       document.getElementById('loadingState').classList.add('hidden');
       document.getElementById('step1').classList.remove('hidden');
-      document.getElementById('captchaInput').value = '';
-      document.getElementById('captchaError').classList.add('hidden');
+      document.getElementById('cedulaInput').value = '';
+      document.getElementById('sectorInput').value = '';
     }
 
-    async function handleStartSession(e) {
+    async function handleGenerateAuto(e) {
       e.preventDefault();
       const cedula = document.getElementById('cedulaInput').value.trim();
       const sector = document.getElementById('sectorInput').value.trim();
 
       if (!cedula || !sector) return;
 
-      showLoading('Conectando con la Judicatura...', 'Llenando automáticamente los 15 campos y datos de Pichincha - Quito');
+      showLoading('Generando Denuncia...', 'Llenando datos oficiales en Pichincha - Quito y resolviendo seguridad...');
 
       try {
-        const response = await fetch('/api/start-session', {
+        const response = await fetch('/api/generar-denuncia-auto', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cedula, sector })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok || !data.success) {
-          throw new Error(data.detail || data.error || 'Error al iniciar el formulario');
-        }
-
-        currentSessionId = data.sessionId;
-        document.getElementById('detectedName').innerText = data.nombre;
-        document.getElementById('detectedLossDate').innerText = `Fecha: ${data.fecha}`;
-        document.getElementById('detectedSector').innerText = `Sector: ${data.sector}`;
-        document.getElementById('captchaImage').src = data.captchaImage;
-
-        hideLoading();
-        document.getElementById('step2').classList.remove('hidden');
-        setTimeout(() => document.getElementById('captchaInput').focus(), 300);
-
-      } catch (err) {
-        hideLoading();
-        document.getElementById('step1').classList.remove('hidden');
-        alert('Error: ' + err.message);
-      }
-    }
-
-    async function handleRefreshCaptcha() {
-      if (!currentSessionId) return;
-      const img = document.getElementById('captchaImage');
-      img.classList.add('opacity-30');
-
-      try {
-        const response = await fetch('/api/refresh-captcha', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: currentSessionId })
-        });
-        const data = await response.json();
-        if (data.success) {
-          img.src = data.captchaImage;
-        }
-      } catch (err) {
-        console.error(err);
-      } finally {
-        img.classList.remove('opacity-30');
-      }
-    }
-
-    async function handleSubmitCaptcha(e) {
-      e.preventDefault();
-      const captchaText = document.getElementById('captchaInput').value.trim();
-      if (!captchaText || !currentSessionId) return;
-
-      const errorDiv = document.getElementById('captchaError');
-      errorDiv.classList.add('hidden');
-
-      showLoading('Verificando y Descargando PDF...', 'Confirmando formulario y obteniendo comprobante oficial...');
-
-      try {
-        const response = await fetch('/api/submit-captcha', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            session_id: currentSessionId,
-            captcha_text: captchaText
-          })
         });
 
         const data = await response.json();
@@ -359,26 +258,65 @@
           const dlBtn = document.getElementById('btnDownloadPdf');
           dlBtn.href = data.downloadUrl;
           
-          document.getElementById('step3').classList.remove('hidden');
-
-          // Trigger download automatically
+          document.getElementById('stepSuccess').classList.remove('hidden');
           window.open(data.downloadUrl, '_blank');
-        } else {
+        } else if (data.requireManualCaptcha) {
           hideLoading();
-          document.getElementById('step2').classList.remove('hidden');
-          errorDiv.innerText = data.error || 'Código incorrecto. Intente con el nuevo código generado.';
-          errorDiv.classList.remove('hidden');
-          if (data.newCaptcha) {
-            document.getElementById('captchaImage').src = data.newCaptcha;
-          }
-          document.getElementById('captchaInput').value = '';
-          document.getElementById('captchaInput').focus();
+          currentSessionId = data.sessionId;
+          document.getElementById('manualCaptchaImage').src = data.captchaImage;
+          document.getElementById('stepCaptchaManual').classList.remove('hidden');
+          setTimeout(() => document.getElementById('manualCaptchaInput').focus(), 300);
+        } else {
+          throw new Error(data.detail || data.error || 'Error al generar la denuncia');
         }
       } catch (err) {
         hideLoading();
-        document.getElementById('step2').classList.remove('hidden');
-        errorDiv.innerText = 'Error al enviar: ' + err.message;
-        errorDiv.classList.remove('hidden');
+        document.getElementById('step1').classList.remove('hidden');
+        alert('Error: ' + err.message);
+      }
+    }
+
+    async function handleSubmitManualCaptcha(e) {
+      e.preventDefault();
+      const captchaText = document.getElementById('manualCaptchaInput').value.trim();
+      if (!captchaText || !currentSessionId) return;
+
+      showLoading('Descargando PDF Oficial...', 'Confirmando código de seguridad...');
+
+      try {
+        const response = await fetch('/api/submit-captcha-manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: currentSessionId, captcha_text: captchaText })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+          hideLoading();
+          document.getElementById('finalNombre').innerText = data.nombre;
+          document.getElementById('finalCedula').innerText = data.cedula;
+          const dlBtn = document.getElementById('btnDownloadPdf');
+          dlBtn.href = data.downloadUrl;
+          
+          document.getElementById('stepSuccess').classList.remove('hidden');
+          window.open(data.downloadUrl, '_blank');
+        } else {
+          hideLoading();
+          document.getElementById('stepCaptchaManual').classList.remove('hidden');
+          const errorDiv = document.getElementById('manualCaptchaError');
+          errorDiv.innerText = data.error || 'Código incorrecto. Intente de nuevo.';
+          errorDiv.classList.remove('hidden');
+          if (data.newCaptcha) {
+            document.getElementById('manualCaptchaImage').src = data.newCaptcha;
+          }
+          document.getElementById('manualCaptchaInput').value = '';
+          document.getElementById('manualCaptchaInput').focus();
+        }
+      } catch (err) {
+        hideLoading();
+        document.getElementById('stepCaptchaManual').classList.remove('hidden');
+        alert('Error: ' + err.message);
       }
     }
   </script>

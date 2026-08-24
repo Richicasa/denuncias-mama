@@ -1,5 +1,11 @@
 FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy
 
+# Instalar Tesseract OCR para resolución automática de Captchas
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY requirements.txt .
