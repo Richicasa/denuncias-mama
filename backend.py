@@ -41,7 +41,7 @@ async def startup_event():
     playwright_instance = await async_playwright().start()
     browser_instance = await playwright_instance.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-setuid-sandbox"]
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     )
     print("Motor de navegación iniciado exitosamente.")
 
@@ -76,19 +76,16 @@ def solve_captcha_image(image_bytes: bytes) -> str:
         return ""
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("L")
-        # Escalar 3x para máxima nitidez OCR
         img = img.resize((img.width * 3, img.height * 3), Image.Resampling.LANCZOS)
-        # Binarización: texto blanco sobre fondo gris
         threshold = 180
         img = img.point(lambda p: 0 if p > threshold else 255)
         
-        # OCR con whitelist alfanumérica
         text = pytesseract.image_to_string(
             img,
             config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         ).strip()
         cleaned = re.sub(r'[^A-Za-z0-9]', '', text)
-        print(f"[OCR] Captcha detectado automáticamente: '{cleaned}'")
+        print(f"[OCR] Captcha detectado: '{cleaned}'")
         return cleaned
     except Exception as e:
         print(f"[OCR Error] {e}")
@@ -121,14 +118,14 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
     page = await context.new_page()
     
     try:
-        # Cargar página oficial
+        print(f"Iniciando trámite para cédula {cedula} en {sector}...")
         await page.goto("https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf", timeout=45000)
         await page.wait_for_load_state("networkidle")
         
         # 1. Cédula
         await page.fill("#numeroIdentificacion", cedula)
         await page.locator("#numeroIdentificacion").blur()
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(2500)
         
         nombre = await page.input_value("#nombreCompleto")
         if not nombre:
@@ -175,8 +172,8 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await accept_doc_btn.click()
         await page.wait_for_timeout(2500)
         
-        # 6. Intentar resolver el Captcha automáticamente (hasta 3 intentos)
-        max_attempts = 3
+        # 6. Intentar resolver el Captcha automáticamente con verificación
+        max_attempts = 4
         solved_successfully = False
         last_captcha_b64 = ""
         
@@ -190,54 +187,70 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             
             auto_code = solve_captcha_image(captcha_bytes)
             if not auto_code or len(auto_code) < 4:
-                # Si el OCR no está seguro, refrescar captcha para probar con uno más claro
-                print(f"[Intento {attempt+1}] Captcha no legible con seguridad, refrescando...")
+                print(f"[Intento {attempt+1}] Captcha dudoso, refrescando imagen...")
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(2000)
                 continue
                 
-            print(f"[Intento {attempt+1}] Probando código automático: {auto_code}")
+            print(f"[Intento {attempt+1}] Probando código OCR: '{auto_code}'")
             await page.fill("#captchaTxt", auto_code)
             await page.click("#j_idt170") # Aceptar
-            await page.wait_for_timeout(2500)
+            await page.wait_for_timeout(3000)
             
-            # Verificar si hubo error de captcha
-            errors = await page.eval_on_selector_all(".rf-msgs, .rf-msg", "els => els.map(e => e.innerText.trim()).filter(t => t.length > 0)")
-            has_error = any("captcha" in m.lower() or "código" in m.lower() or "incorrecto" in m.lower() for m in errors)
+            # Comprobar si apareció la ventana modal de confirmación
+            confirm_modal_visible = await page.evaluate("""
+                (function() {
+                    const modal = document.getElementById('frmPopups:confirmForm');
+                    const container = document.getElementById('frmPopups:confirmForm_container');
+                    if (modal && modal.style.visibility !== 'hidden' && modal.style.display !== 'none') return true;
+                    if (container && container.style.visibility !== 'hidden' && container.style.display !== 'none') return true;
+                    return false;
+                })()
+            """)
             
-            if not has_error:
+            if confirm_modal_visible:
+                print(f"[Intento {attempt+1}] ¡Captcha validado correctamente por la Judicatura!")
                 solved_successfully = True
                 break
             else:
-                print(f"[Intento {attempt+1}] Captcha rechazado por el servidor, reintentando con nuevo captcha...")
-                await page.wait_for_timeout(1000)
+                print(f"[Intento {attempt+1}] Captcha no válido, refrescando para reintentar...")
+                await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
+                await page.wait_for_timeout(2000)
                 
-        # Si se resolvió automáticamente:
+        # 7. Si se resolvió con éxito:
         if solved_successfully:
-            # Confirmación modal ("Si")
-            await page.wait_for_timeout(1000)
-            si_btn = page.locator('#frmPopups\\:confirmForm input[value="Si"]')
-            if await si_btn.count() > 0:
-                await si_btn.click()
-                await page.wait_for_timeout(2500)
-                
-            # Descargar PDF
-            pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
-            ver_btn = page.locator('input[value="Ver formulario"]').first
+            # Confirmar registro (clic en 'Si')
+            print("Confirmando formulario en modal de la Judicatura...")
+            await page.evaluate("""
+                if (window.si) {
+                    window.si();
+                } else {
+                    const siBtn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]');
+                    if (siBtn) siBtn.click();
+                }
+            """)
+            await page.wait_for_timeout(3500)
             
-            if await ver_btn.count() > 0:
-                async with page.expect_download(timeout=30000) as download_info:
-                    await ver_btn.click()
-                download = await download_info.value
-                await download.save_as(pdf_path)
-            else:
-                await page.evaluate("if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) RichFaces.$('frmPopups:pdfPane1').show();")
-                await page.wait_for_timeout(1000)
-                async with page.expect_download(timeout=30000) as download_info:
-                    await page.click('input[value="Ver formulario"]')
-                download = await download_info.value
-                await download.save_as(pdf_path)
-                
+            # Descargar PDF directamente
+            pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
+            print("Descargando PDF oficial...")
+            
+            async with page.expect_download(timeout=45000) as download_info:
+                await page.evaluate("""
+                    const btn = document.querySelector('input[value="Ver formulario"]') || 
+                                document.querySelector('input[name*="j_idt242"]') ||
+                                document.querySelector('input[name*="j_idt252"]');
+                    if (btn) {
+                        btn.click();
+                    } else {
+                        const form = document.getElementById('frmPopups');
+                        if (form) form.submit();
+                    }
+                """)
+            download = await download_info.value
+            await download.save_as(pdf_path)
+            print(f"PDF guardado exitosamente: {pdf_path}")
+            
             sessions[session_id] = {
                 "pdf_path": pdf_path,
                 "cedula": cedula,
@@ -247,14 +260,12 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             
             return {
                 "success": True,
-                "autoSolved": True,
-                "message": "¡Denuncia generada y firmada automáticamente!",
                 "downloadUrl": f"/api/download-pdf/{session_id}",
                 "cedula": cedula,
                 "nombre": nombre
             }
             
-        # Si fallaron los 3 intentos automáticos (fallback asistido):
+        # Fallback manual en caso de que los 4 intentos automáticos no pasen
         sessions[session_id] = {
             "context": context,
             "page": page,
@@ -276,6 +287,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         
     except Exception as e:
         await context.close()
+        print(f"Error procesando: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/submit-captcha-manual")
@@ -291,10 +303,19 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
     try:
         await page.fill("#captchaTxt", captcha_text)
         await page.click("#j_idt170")
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(3000)
         
-        errors = await page.eval_on_selector_all(".rf-msgs, .rf-msg", "els => els.map(e => e.innerText.trim()).filter(t => t.length > 0)")
-        if any("captcha" in m.lower() or "código" in m.lower() or "incorrecto" in m.lower() for m in errors):
+        confirm_modal_visible = await page.evaluate("""
+            (function() {
+                const modal = document.getElementById('frmPopups:confirmForm');
+                const container = document.getElementById('frmPopups:confirmForm_container');
+                if (modal && modal.style.visibility !== 'hidden' && modal.style.display !== 'none') return true;
+                if (container && container.style.visibility !== 'hidden' && container.style.display !== 'none') return true;
+                return false;
+            })()
+        """)
+        
+        if not confirm_modal_visible:
             captcha_el = await page.query_selector("#imgCaptchaId")
             new_b64 = ""
             if captcha_el:
@@ -302,25 +323,36 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
                 new_b64 = f"data:image/jpeg;base64,{base64.b64encode(c_bytes).decode('utf-8')}"
             return {
                 "success": False,
-                "error": "Código incorrecto. Intente con el nuevo código.",
+                "error": "Código incorrecto. Intente nuevamente con el código de la imagen.",
                 "newCaptcha": new_b64
             }
             
-        await page.wait_for_timeout(1000)
-        si_btn = page.locator('#frmPopups\\:confirmForm input[value="Si"]')
-        if await si_btn.count() > 0:
-            await si_btn.click()
-            await page.wait_for_timeout(2500)
-            
-        pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{session['cedula']}_{uuid.uuid4().hex[:6]}.pdf")
-        ver_btn = page.locator('input[value="Ver formulario"]').first
+        await page.evaluate("""
+            if (window.si) {
+                window.si();
+            } else {
+                const siBtn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]');
+                if (siBtn) siBtn.click();
+            }
+        """)
+        await page.wait_for_timeout(3500)
         
-        if await ver_btn.count() > 0:
-            async with page.expect_download(timeout=30000) as download_info:
-                await ver_btn.click()
-            download = await download_info.value
-            await download.save_as(pdf_path)
-            
+        pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{session['cedula']}_{uuid.uuid4().hex[:6]}.pdf")
+        async with page.expect_download(timeout=45000) as download_info:
+            await page.evaluate("""
+                const btn = document.querySelector('input[value="Ver formulario"]') || 
+                            document.querySelector('input[name*="j_idt242"]') ||
+                            document.querySelector('input[name*="j_idt252"]');
+                if (btn) {
+                    btn.click();
+                } else {
+                    const form = document.getElementById('frmPopups');
+                    if (form) form.submit();
+                }
+            """)
+        download = await download_info.value
+        await download.save_as(pdf_path)
+        
         session["pdf_path"] = pdf_path
         await context.close()
         
