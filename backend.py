@@ -157,7 +157,8 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             await page.wait_for_function("document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=8000)
         except Exception:
             await page.wait_for_timeout(1500)
-        await page.select_option("#cantonDomicilio", value="185")
+        # 178 = QUITO (185 era Puerto Quito)
+        await page.select_option("#cantonDomicilio", label="QUITO")
         await page.fill("#direccionDomicilio", dir_domicilio)
         
         # 3. Extravío (Pichincha -> Quito -> Circunstancia redactada)
@@ -166,7 +167,8 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             await page.wait_for_function("document.querySelectorAll('#cantonExtravio option').length > 1", timeout=8000)
         except Exception:
             await page.wait_for_timeout(1500)
-        await page.select_option("#cantonExtravio", value="185")
+        # 178 = QUITO
+        await page.select_option("#cantonExtravio", label="QUITO")
         await page.fill("#direccionCircunstancia", dir_circunstancia)
         
         # 4. Fecha hábil anterior
