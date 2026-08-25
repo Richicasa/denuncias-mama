@@ -72,20 +72,36 @@ def format_date_for_input(d):
     return f"{months_short[d.month - 1]} {d.day}, {d.year}"
 
 def solve_captcha_image(image_bytes: bytes) -> str:
+    """
+    Resuelve el captcha con algoritmo adaptativo multi-umbral de alta precisión.
+    """
     if not pytesseract:
         return ""
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("L")
-        img = img.resize((img.width * 3, img.height * 3), Image.Resampling.LANCZOS)
-        threshold = 180
-        img = img.point(lambda p: 0 if p > threshold else 255)
+        img_orig = Image.open(io.BytesIO(image_bytes)).convert("L")
+        w, h = img_orig.size
+        scaled = img_orig.resize((w * 4, h * 4), Image.Resampling.LANCZOS)
         
+        umbrales = [175, 160, 190, 150, 200]
+        for th in umbrales:
+            bin_img = scaled.point(lambda p: 0 if p > th else 255)
+            text = pytesseract.image_to_string(
+                bin_img,
+                config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+            ).strip()
+            cleaned = re.sub(r'[^A-Za-z0-9]', '', text)
+            if len(cleaned) >= 5 and len(cleaned) <= 6:
+                print(f"[OCR Alta Precisión] Código detectado ({len(cleaned)} chars): '{cleaned}' con umbral {th}")
+                return cleaned
+                
+        # Fallback estándar
+        bin_img = scaled.point(lambda p: 0 if p > 175 else 255)
         text = pytesseract.image_to_string(
-            img,
+            bin_img,
             config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         ).strip()
         cleaned = re.sub(r'[^A-Za-z0-9]', '', text)
-        print(f"[OCR] Código leído: '{cleaned}'")
+        print(f"[OCR Fallback] Código detectado: '{cleaned}'")
         return cleaned
     except Exception as e:
         print(f"[OCR Error] {e}")
@@ -151,7 +167,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         if not nombre:
             nombre = "CIUDADANO REGISTRADO"
             
-        # 2. Domicilio (Pichincha -> Quito -> Domicilio redactado)
+        # 2. Domicilio (Pichincha -> Quito)
         await page.select_option("#provinciaDomicilio", value="17")
         try:
             await page.wait_for_function("document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=8000)
@@ -160,7 +176,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await page.select_option("#cantonDomicilio", label="QUITO")
         await page.fill("#direccionDomicilio", dir_domicilio)
         
-        # 3. Extravío (Pichincha -> Quito -> Circunstancia redactada)
+        # 3. Extravío (Pichincha -> Quito)
         await page.select_option("#provinciaExtravio", value="17")
         try:
             await page.wait_for_function("document.querySelectorAll('#cantonExtravio option').length > 1", timeout=8000)
@@ -198,7 +214,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await accept_doc_btn.click(force=True)
         await page.wait_for_timeout(2000)
         
-        # Limpieza forzada de cualquier shade/overlay residual de la ventana modal
+        # Limpieza forzada de cualquier sombra residual
         await page.evaluate("""
             if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
                 RichFaces.$('frmPopups:createPane').hide();
@@ -208,8 +224,8 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         """)
         await page.wait_for_timeout(1000)
         
-        # 6. Intentar resolver el Captcha automáticamente (hasta 4 intentos)
-        max_attempts = 4
+        # 6. Intentar resolver el Captcha automáticamente (hasta 5 intentos)
+        max_attempts = 5
         solved_successfully = False
         last_captcha_b64 = ""
         
@@ -231,7 +247,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             print(f"[Intento {attempt+1}] Enviando código OCR: '{auto_code}'")
             await page.fill("#captchaTxt", auto_code)
             
-            # Clic inmune a bloqueos con JavaScript directo
+            # Clic directo por JavaScript
             await page.evaluate("""
                 const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
                 if (btn) btn.click();
@@ -257,7 +273,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
                 await page.wait_for_timeout(1500)
                 
-        # 7. Confirmar y Descargar PDF
+        # 7. Confirmar y Descargar PDF con sincronización robusta
         if solved_successfully:
             print("Confirmando modal de registro (clic en Si)...")
             await page.evaluate("""
@@ -268,13 +284,33 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     if (siBtn) siBtn.click();
                 }
             """)
-            await page.wait_for_timeout(3000)
             
+            # Esperar a que el servidor de la Judicatura guarde en base de datos y despliegue el panel de PDF
+            print("Esperando generación oficial del PDF en la base de datos de la Judicatura...")
+            try:
+                await page.wait_for_function("""
+                    (function() {
+                        const p1 = document.getElementById('frmPopups:pdfPane1');
+                        const p1_c = document.getElementById('frmPopups:pdfPane1_container');
+                        const btn = document.querySelector('input[value="Ver formulario"]');
+                        if (p1 && p1.style.visibility !== 'hidden' && p1.style.display !== 'none') return true;
+                        if (p1_c && p1_c.style.visibility !== 'hidden' && p1_c.style.display !== 'none') return true;
+                        if (btn && btn.offsetParent !== null) return true;
+                        return false;
+                    })()
+                """, timeout=15000)
+            except Exception:
+                await page.wait_for_timeout(3500)
+                
             pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
-            print("Descargando PDF oficial...")
+            print("Iniciando descarga segura de PDF...")
             
-            async with page.expect_download(timeout=35000) as download_info:
+            async with page.expect_download(timeout=45000) as download_info:
+                # Activar el panel si aún está oculto y hacer clic
                 await page.evaluate("""
+                    if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) {
+                        RichFaces.$('frmPopups:pdfPane1').show();
+                    }
                     const btn = document.querySelector('input[value="Ver formulario"]') || 
                                 document.querySelector('input[name*="j_idt242"]') ||
                                 document.querySelector('input[name*="j_idt252"]');
@@ -287,7 +323,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 """)
             download = await download_info.value
             await download.save_as(pdf_path)
-            print(f"PDF generado y guardado en: {pdf_path}")
+            print(f"PDF generado y guardado en: {pdf_path} ({os.path.getsize(pdf_path)} bytes)")
             
             sessions[session_id] = {
                 "pdf_path": pdf_path,
@@ -380,11 +416,14 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
                 if (siBtn) siBtn.click();
             }
         """)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(4000)
         
         pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{session['cedula']}_{uuid.uuid4().hex[:6]}.pdf")
-        async with page.expect_download(timeout=35000) as download_info:
+        async with page.expect_download(timeout=45000) as download_info:
             await page.evaluate("""
+                if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) {
+                    RichFaces.$('frmPopups:pdfPane1').show();
+                }
                 const btn = document.querySelector('input[value="Ver formulario"]') || 
                             document.querySelector('input[name*="j_idt242"]') ||
                             document.querySelector('input[name*="j_idt252"]');
