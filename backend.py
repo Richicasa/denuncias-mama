@@ -201,50 +201,53 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         """)
         await page.wait_for_timeout(500)
         
-        # 5. Agregar documento Cédula con eventos JSF garantizados
-        print("Agregando documento extraviado en la tabla...")
-        add_btn = page.locator('input[value="+ Agregar un nuevo documento"]')
-        await add_btn.click(force=True)
-        await page.wait_for_timeout(1500)
-        
-        # Seleccionar Tipo 7 (Cédula) y emitir evento change
-        await page.select_option("#frmPopups\\:tipoDocumentoExtraviadoNewSelect", value="7")
-        await page.evaluate("""
+        # 5. Agregar documento Cédula a la tabla con sincronización JSF garantizada
+        print("Registrando documento extraviado en la tabla oficial...")
+        await page.evaluate(f"""
+            if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {{
+                RichFaces.$('frmPopups:createPane').show();
+            }}
             const sel = document.getElementById('frmPopups:tipoDocumentoExtraviadoNewSelect');
-            if (sel) sel.dispatchEvent(new Event('change', { bubbles: true }));
+            if (sel) {{
+                sel.value = '7';
+                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            }}
+            const num = document.getElementById('frmPopups:numeroNew');
+            if (num) {{
+                num.value = '{cedula}';
+                num.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                num.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+            }}
+            const desc = document.getElementById('frmPopups:descripcionNew');
+            if (desc) {{
+                desc.value = 'cédula de identidad';
+                desc.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                desc.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+            }}
         """)
         await page.wait_for_timeout(800)
         
-        # Llenar número de cédula y emitir change/blur
-        await page.fill("#frmPopups\\:numeroNew", cedula)
+        # Clic en Aceptar del popup
         await page.evaluate("""
-            const num = document.getElementById('frmPopups:numeroNew');
-            if (num) {
-                num.dispatchEvent(new Event('change', { bubbles: true }));
-                num.dispatchEvent(new Event('blur', { bubbles: true }));
+            const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
+            if (btn) btn.click();
+        """)
+        await page.wait_for_timeout(2500)
+        
+        # Verificar que la fila esté en la tabla
+        has_doc_row = await page.evaluate(f"document.body.innerText.includes('{cedula}')")
+        print(f"✔ Documento añadido a la tabla oficial: {has_doc_row}")
+        
+        # Limpieza de shade
+        await page.evaluate("""
+            if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
+                RichFaces.$('frmPopups:createPane').hide();
             }
+            const shade = document.getElementById('frmPopups:createPane_shade');
+            if (shade) shade.remove();
         """)
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(800)
         
-        # Llenar descripción y emitir change
-        await page.fill("#frmPopups\\:descripcionNew", "cédula de identidad")
-        await page.evaluate("""
-            const desc = document.getElementById('frmPopups:descripcionNew');
-            if (desc) desc.dispatchEvent(new Event('change', { bubbles: true }));
-        """)
-        await page.wait_for_timeout(500)
-        
-        # Clic en Aceptar dentro del popup
-        accept_doc_btn = page.locator('#frmPopups\\:createPane input[value="Aceptar"]')
-        await accept_doc_btn.click(force=True)
-        
-        # Esperar a que la fila aparezca en la tabla de documentos
-        try:
-            await page.wait_for_function(f"document.body.innerText.includes('{cedula}')", timeout=6000)
-            print("✔ Documento confirmado en la tabla oficial.")
-        except Exception:
-            await page.wait_for_timeout(2500)
-            
         # 6. Intentar resolver el Captcha automáticamente (hasta 5 intentos)
         max_attempts = 5
         solved_successfully = False
@@ -293,7 +296,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
                 await page.wait_for_timeout(1500)
                 
-        # 7. Confirmar y Descargar PDF con motor híbrido ultra seguro
+        # 7. Confirmar y Descargar PDF con motor híbrido
         if solved_successfully:
             print("Confirmando modal de registro (clic en Si)...")
             await page.evaluate("""
