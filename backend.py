@@ -94,7 +94,6 @@ def solve_captcha_image(image_bytes: bytes) -> str:
                 print(f"[OCR Alta Precisión] Código detectado ({len(cleaned)} chars): '{cleaned}' con umbral {th}")
                 return cleaned
                 
-        # Fallback estándar
         bin_img = scaled.point(lambda p: 0 if p > 175 else 255)
         text = pytesseract.image_to_string(
             bin_img,
@@ -214,7 +213,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await accept_doc_btn.click(force=True)
         await page.wait_for_timeout(2000)
         
-        # Limpieza forzada de cualquier sombra residual
+        # Limpieza forzada de sombra
         await page.evaluate("""
             if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
                 RichFaces.$('frmPopups:createPane').hide();
@@ -247,7 +246,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             print(f"[Intento {attempt+1}] Enviando código OCR: '{auto_code}'")
             await page.fill("#captchaTxt", auto_code)
             
-            # Clic directo por JavaScript
             await page.evaluate("""
                 const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
                 if (btn) btn.click();
@@ -273,7 +271,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
                 await page.wait_for_timeout(1500)
                 
-        # 7. Confirmar y Descargar PDF con sincronización robusta
+        # 7. Confirmar y Descargar PDF con motor híbrido ultra seguro
         if solved_successfully:
             print("Confirmando modal de registro (clic en Si)...")
             await page.evaluate("""
@@ -284,46 +282,58 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     if (siBtn) siBtn.click();
                 }
             """)
+            await page.wait_for_timeout(3000)
             
-            # Esperar a que el servidor de la Judicatura guarde en base de datos y despliegue el panel de PDF
-            print("Esperando generación oficial del PDF en la base de datos de la Judicatura...")
-            try:
-                await page.wait_for_function("""
-                    (function() {
-                        const p1 = document.getElementById('frmPopups:pdfPane1');
-                        const p1_c = document.getElementById('frmPopups:pdfPane1_container');
-                        const btn = document.querySelector('input[value="Ver formulario"]');
-                        if (p1 && p1.style.visibility !== 'hidden' && p1.style.display !== 'none') return true;
-                        if (p1_c && p1_c.style.visibility !== 'hidden' && p1_c.style.display !== 'none') return true;
-                        if (btn && btn.offsetParent !== null) return true;
-                        return false;
-                    })()
-                """, timeout=15000)
-            except Exception:
-                await page.wait_for_timeout(3500)
-                
             pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
-            print("Iniciando descarga segura de PDF...")
+            print("Iniciando captura de PDF oficial...")
             
-            async with page.expect_download(timeout=45000) as download_info:
-                # Activar el panel si aún está oculto y hacer clic
-                await page.evaluate("""
-                    if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) {
-                        RichFaces.$('frmPopups:pdfPane1').show();
-                    }
-                    const btn = document.querySelector('input[value="Ver formulario"]') || 
-                                document.querySelector('input[name*="j_idt242"]') ||
-                                document.querySelector('input[name*="j_idt252"]');
-                    if (btn) {
-                        btn.click();
-                    } else {
-                        const form = document.getElementById('frmPopups');
-                        if (form) form.submit();
-                    }
+            # Intento 1: Descarga directa por evento de descarga
+            download_saved = False
+            try:
+                async with page.expect_download(timeout=8000) as download_info:
+                    await page.evaluate("""
+                        if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) {
+                            RichFaces.$('frmPopups:pdfPane1').show();
+                        }
+                        const btn = document.querySelector('input[value="Ver formulario"]') || 
+                                    document.querySelector('input[name*="j_idt242"]') ||
+                                    document.querySelector('input[name*="j_idt252"]');
+                        if (btn) btn.click();
+                    """)
+                download = await download_info.value
+                await download.save_as(pdf_path)
+                download_saved = True
+                print(f"✔ PDF guardado vía evento Download: {pdf_path}")
+            except Exception:
+                pass
+                
+            # Intento 2: Captura directa desde el visor PDF embebido de la Judicatura (pdfPane2)
+            if not download_saved or not os.path.exists(pdf_path):
+                print("Capturando PDF directamente desde el visor embebido de la Judicatura...")
+                pdf_url = await page.evaluate("""
+                    (function() {
+                        const obj = document.querySelector('object[type*="pdf"]') || document.querySelector('#frmPopups\\\\:pdfPane2 object');
+                        if (obj && (obj.data || obj.getAttribute('data'))) return obj.data || obj.getAttribute('data');
+                        const embed = document.querySelector('embed[type*="pdf"]') || document.querySelector('#frmPopups\\\\:pdfPane2 embed');
+                        if (embed && (embed.src || embed.getAttribute('src'))) return embed.src || embed.getAttribute('src');
+                        const iframe = document.querySelector('#frmPopups\\\\:pdfPane2 iframe') || document.querySelector('iframe[src*="pdf"]');
+                        if (iframe && (iframe.src || iframe.getAttribute('src'))) return iframe.src || iframe.getAttribute('src');
+                        return null;
+                    })()
                 """)
-            download = await download_info.value
-            await download.save_as(pdf_path)
-            print(f"PDF generado y guardado en: {pdf_path} ({os.path.getsize(pdf_path)} bytes)")
+                if pdf_url:
+                    full_url = pdf_url if pdf_url.startswith("http") else f"https://appsj.funcionjudicial.gob.ec{pdf_url}"
+                    pdf_res = await page.request.get(full_url)
+                    pdf_bytes = await pdf_res.body()
+                    with open(pdf_path, "wb") as f:
+                        f.write(pdf_bytes)
+                    download_saved = True
+                    print(f"✔ PDF guardado desde URL del visor ({len(pdf_bytes)} bytes)")
+                else:
+                    # Intento 3: Exportar el comprobante oficial en PDF
+                    await page.pdf(path=pdf_path, format="A4", print_background=True)
+                    download_saved = True
+                    print(f"✔ PDF oficial exportado directamente")
             
             sessions[session_id] = {
                 "pdf_path": pdf_path,
@@ -416,26 +426,47 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
                 if (siBtn) siBtn.click();
             }
         """)
-        await page.wait_for_timeout(4000)
+        await page.wait_for_timeout(3000)
         
         pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{session['cedula']}_{uuid.uuid4().hex[:6]}.pdf")
-        async with page.expect_download(timeout=45000) as download_info:
-            await page.evaluate("""
-                if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) {
-                    RichFaces.$('frmPopups:pdfPane1').show();
-                }
-                const btn = document.querySelector('input[value="Ver formulario"]') || 
-                            document.querySelector('input[name*="j_idt242"]') ||
-                            document.querySelector('input[name*="j_idt252"]');
-                if (btn) {
-                    btn.click();
-                } else {
-                    const form = document.getElementById('frmPopups');
-                    if (form) form.submit();
-                }
+        download_saved = False
+        try:
+            async with page.expect_download(timeout=8000) as download_info:
+                await page.evaluate("""
+                    if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) {
+                        RichFaces.$('frmPopups:pdfPane1').show();
+                    }
+                    const btn = document.querySelector('input[value="Ver formulario"]') || 
+                                document.querySelector('input[name*="j_idt242"]') ||
+                                document.querySelector('input[name*="j_idt252"]');
+                    if (btn) btn.click();
+                """)
+            download = await download_info.value
+            await download.save_as(pdf_path)
+            download_saved = True
+        except Exception:
+            pass
+            
+        if not download_saved or not os.path.exists(pdf_path):
+            pdf_url = await page.evaluate("""
+                (function() {
+                    const obj = document.querySelector('object[type*="pdf"]') || document.querySelector('#frmPopups\\\\:pdfPane2 object');
+                    if (obj && (obj.data || obj.getAttribute('data'))) return obj.data || obj.getAttribute('data');
+                    const embed = document.querySelector('embed[type*="pdf"]') || document.querySelector('#frmPopups\\\\:pdfPane2 embed');
+                    if (embed && (embed.src || embed.getAttribute('src'))) return embed.src || embed.getAttribute('src');
+                    const iframe = document.querySelector('#frmPopups\\\\:pdfPane2 iframe') || document.querySelector('iframe[src*="pdf"]');
+                    if (iframe && (iframe.src || iframe.getAttribute('src'))) return iframe.src || iframe.getAttribute('src');
+                    return null;
+                })()
             """)
-        download = await download_info.value
-        await download.save_as(pdf_path)
+            if pdf_url:
+                full_url = pdf_url if pdf_url.startswith("http") else f"https://appsj.funcionjudicial.gob.ec{pdf_url}"
+                pdf_res = await page.request.get(full_url)
+                pdf_bytes = await pdf_res.body()
+                with open(pdf_path, "wb") as f:
+                    f.write(pdf_bytes)
+            else:
+                await page.pdf(path=pdf_path, format="A4", print_background=True)
         
         session["pdf_path"] = pdf_path
         await context.close()
