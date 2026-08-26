@@ -13,14 +13,13 @@ from pydantic import BaseModel
 from PIL import Image
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from text_cleaner import limpiar_y_corregir_sector
-from pdf_generator import generate_judicial_pdf_html
 
 try:
     import pytesseract
 except ImportError:
     pytesseract = None
 
-app = FastAPI(title="Denuncias de Extravío de Documentos - 100% Automático")
+app = FastAPI(title="Denuncias de Extravío de Documentos - 100% Real")
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,7 +44,7 @@ async def startup_event():
         headless=True,
         args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     )
-    print("🚀 Motor de navegación iniciado y listo.")
+    print("🚀 Motor de navegación para denuncias judiciales iniciado.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -73,9 +72,6 @@ def format_date_for_input(d):
     return f"{months_short[d.month - 1]} {d.day}, {d.year}"
 
 def solve_captcha_image(image_bytes: bytes) -> str:
-    """
-    Resuelve el captcha con algoritmo adaptativo multi-umbral de alta precisión.
-    """
     if not pytesseract:
         return ""
     try:
@@ -92,7 +88,6 @@ def solve_captcha_image(image_bytes: bytes) -> str:
             ).strip()
             cleaned = re.sub(r'[^A-Za-z0-9]', '', text)
             if len(cleaned) >= 5 and len(cleaned) <= 6:
-                print(f"[OCR Alta Precisión] Código detectado ({len(cleaned)} chars): '{cleaned}' con umbral {th}")
                 return cleaned
                 
         bin_img = scaled.point(lambda p: 0 if p > 175 else 255)
@@ -100,9 +95,7 @@ def solve_captcha_image(image_bytes: bytes) -> str:
             bin_img,
             config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         ).strip()
-        cleaned = re.sub(r'[^A-Za-z0-9]', '', text)
-        print(f"[OCR Fallback] Código detectado: '{cleaned}'")
-        return cleaned
+        return re.sub(r'[^A-Za-z0-9]', '', text)
     except Exception as e:
         print(f"[OCR Error] {e}")
         return ""
@@ -152,6 +145,22 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
     )
     page = await context.new_page()
     
+    # Interceptor de red para capturar el PDF real emitido por los servidores del Consejo de la Judicatura
+    captured_real_pdf = None
+    
+    async def route_interceptor(route, request):
+        nonlocal captured_real_pdf
+        response = await route.fetch()
+        ct = response.headers.get("content-type", "").lower()
+        if "application/pdf" in ct or "pdf" in ct:
+            body = await response.body()
+            if body.startswith(b"%PDF"):
+                captured_real_pdf = body
+                print(f"✔ PDF OFICIAL REAL CAPTURADO DE LA JUDICATURA: {len(body)} bytes")
+        await route.fulfill(response=response)
+        
+    await page.route("**/formulario.jsf*", route_interceptor)
+    
     try:
         print(f"Cargando portal judicial para cédula {cedula}...")
         await page.goto("https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf", timeout=45000)
@@ -184,11 +193,9 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await page.select_option("#cantonExtravio", label="QUITO")
         await page.fill("#direccionCircunstancia", dir_circunstancia)
         
-        # 4. Fecha hábil anterior con sincronización completa
+        # 4. Fecha hábil anterior
         b_day = get_last_business_day()
         formatted_date = format_date_for_input(b_day)
-        fecha_sql_format = b_day.strftime("%Y-%m-%d")
-        
         await page.evaluate(f"""
             const d = new Date({b_day.year}, {b_day.month - 1}, {b_day.day});
             if (window.RichFaces && RichFaces.$('fecha')) {{
@@ -203,8 +210,11 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         """)
         await page.wait_for_timeout(500)
         
-        # 5. Agregar documento Cédula a la tabla con sincronización JSF garantizada
+        # 5. Agregar documento Cédula a la tabla oficial de la Judicatura
         print("Registrando documento extraviado en la tabla oficial...")
+        await page.locator('input[value="+ Agregar un nuevo documento"]').click(force=True)
+        await page.wait_for_timeout(1000)
+        
         await page.evaluate(f"""
             if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {{
                 RichFaces.$('frmPopups:createPane').show();
@@ -229,14 +239,23 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         """)
         await page.wait_for_timeout(800)
         
-        # Clic en Aceptar del popup
         await page.evaluate("""
             const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
             if (btn) btn.click();
         """)
         await page.wait_for_timeout(2500)
         
-        # 6. Intentar resolver el Captcha automáticamente (hasta 5 intentos)
+        # Limpieza de sombra
+        await page.evaluate("""
+            if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
+                RichFaces.$('frmPopups:createPane').hide();
+            }
+            const shade = document.getElementById('frmPopups:createPane_shade');
+            if (shade) shade.remove();
+        """)
+        await page.wait_for_timeout(500)
+        
+        # 6. Intentar resolver el Captcha automáticamente
         max_attempts = 5
         solved_successfully = False
         last_captcha_b64 = ""
@@ -284,41 +303,33 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
                 await page.wait_for_timeout(1500)
                 
-        # 7. Confirmar en la Judicatura y Generar PDF Oficial con Formato Idéntico
+        # 7. Confirmar en la Judicatura y descargar el PDF REAL
         if solved_successfully:
-            print("Confirmando modal de registro en la Judicatura (clic en Si)...")
+            print("Confirmando denuncia de forma real en la Judicatura (clic en Si)...")
             await page.evaluate("""
-                if (window.si) {
-                    window.si();
-                } else {
-                    const siBtn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]');
-                    if (siBtn) siBtn.click();
-                }
+                const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
+                if (btn) btn.click();
+                else if (window.si) window.si();
             """)
-            await page.wait_for_timeout(2500)
+            await page.wait_for_timeout(3500)
             
-            # Generar el PDF oficial auténtico con la plantilla oficial de la Judicatura
+            print("Solicitando el PDF oficial generado por el servidor judicial...")
+            await page.evaluate("""
+                const btn = document.querySelector('input[value="Ver formulario"]') || 
+                            document.querySelector('input[name*="j_idt242"]') ||
+                            document.querySelector('input[name*="j_idt252"]');
+                if (btn) btn.click();
+            """)
+            await page.wait_for_timeout(5000)
+            
+            if not captured_real_pdf or not captured_real_pdf.startswith(b"%PDF"):
+                raise Exception("El servidor de la Judicatura no entregó el flujo binario del PDF oficial.")
+                
             pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
-            print(f"Generando Formulario de Constancia Oficial de la Judicatura...")
-            
-            html_content = generate_judicial_pdf_html(
-                cedula=cedula,
-                nombre=nombre,
-                dir_domicilio=dir_domicilio,
-                dir_circunstancia=dir_circunstancia,
-                fecha_extravio=fecha_sql_format
-            )
-            
-            pdf_page = await context.new_page()
-            await pdf_page.set_content(html_content)
-            await pdf_page.pdf(
-                path=pdf_path,
-                format="A4",
-                print_background=True,
-                margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"}
-            )
-            await pdf_page.close()
-            print(f"✔ PDF oficial generado exitosamente: {pdf_path}")
+            with open(pdf_path, "wb") as f:
+                f.write(captured_real_pdf)
+                
+            print(f"✔ ARCHIVO PDF AUTÉNTICO GUARDADO: {pdf_path} ({len(captured_real_pdf)} bytes)")
             
             sessions[session_id] = {
                 "pdf_path": pdf_path,
@@ -346,9 +357,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             "sector": sector_limpio,
             "nombre": nombre,
             "fecha": formatted_date,
-            "dir_domicilio": dir_domicilio,
-            "dir_circunstancia": dir_circunstancia,
-            "fecha_sql": fecha_sql_format
+            "captured_pdf_ref": lambda: captured_real_pdf
         }
         
         return {
@@ -363,7 +372,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         
     except Exception as e:
         await context.close()
-        print(f"Error procesando: {e}")
+        print(f"Error procesando denuncia: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/submit-captcha-manual")
@@ -407,34 +416,28 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
             }
             
         await page.evaluate("""
-            if (window.si) {
-                window.si();
-            } else {
-                const siBtn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]');
-                if (siBtn) siBtn.click();
-            }
+            const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
+            if (btn) btn.click();
+            else if (window.si) window.si();
         """)
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(3500)
         
+        await page.evaluate("""
+            const btn = document.querySelector('input[value="Ver formulario"]') || 
+                        document.querySelector('input[name*="j_idt242"]') ||
+                        document.querySelector('input[name*="j_idt252"]');
+            if (btn) btn.click();
+        """)
+        await page.wait_for_timeout(5000)
+        
+        captured_pdf = session["captured_pdf_ref"]()
+        if not captured_pdf or not captured_pdf.startswith(b"%PDF"):
+            raise Exception("No se pudo obtener el archivo PDF de los servidores de la Judicatura.")
+            
         pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{session['cedula']}_{uuid.uuid4().hex[:6]}.pdf")
-        html_content = generate_judicial_pdf_html(
-            cedula=session["cedula"],
-            nombre=session["nombre"],
-            dir_domicilio=session["dir_domicilio"],
-            dir_circunstancia=session["dir_circunstancia"],
-            fecha_extravio=session.get("fecha_sql", "2026-08-24")
-        )
-        
-        pdf_page = await context.new_page()
-        await pdf_page.set_content(html_content)
-        await pdf_page.pdf(
-            path=pdf_path,
-            format="A4",
-            print_background=True,
-            margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"}
-        )
-        await pdf_page.close()
-        
+        with open(pdf_path, "wb") as f:
+            f.write(captured_pdf)
+            
         session["pdf_path"] = pdf_path
         await context.close()
         
