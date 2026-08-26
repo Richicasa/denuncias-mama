@@ -166,7 +166,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         )
         page = await context.new_page()
         
-        # Captura directa y limpia del PDF oficial sin interferir con otros recursos
         captured_real_pdf = None
         
         async def route_interceptor(route, request):
@@ -178,7 +177,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     body = await response.body()
                     if body.startswith(b"%PDF"):
                         captured_real_pdf = body
-                        print(f"✔ PDF OFICIAL REAL CAPTURADO DE LA JUDICATURA: {len(body)} bytes")
+                        print(f"[Captura PDF] Archivo PDF oficial recibido con exito ({len(body)} bytes)")
                 await route.fulfill(response=response)
             except Exception:
                 try:
@@ -330,30 +329,37 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
                     await page.wait_for_timeout(1500)
                     
-            # 7. Confirmar en la Judicatura y descargar el PDF REAL
+            # 7. Confirmar en la Judicatura con sincronización AJAX y descargar el PDF REAL
             if solved_successfully:
                 print("Confirmando denuncia de forma real en la Judicatura (clic en Si)...")
-                await page.evaluate("""
-                    const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
-                    if (btn) btn.click();
-                    else if (window.si) window.si();
-                """)
-                await page.wait_for_timeout(3500)
+                try:
+                    async with page.expect_response(lambda r: "formulario.jsf" in r.url and r.status == 200, timeout=20000):
+                        await page.evaluate("""
+                            const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
+                            if (btn) btn.click();
+                            else if (window.si) window.si();
+                        """)
+                except Exception:
+                    await page.wait_for_timeout(3000)
+                    
+                print("Esperando renderizado del modal del PDF oficial...")
+                await page.wait_for_timeout(2000)
                 
                 print("Haciendo clic en el botón oficial 'Ver formulario'...")
                 await page.evaluate("""
-                    const btn = document.querySelector('input[value="Ver formulario"]') || 
-                                document.querySelector('input[name*="j_idt242"]') ||
-                                document.querySelector('input[name*="j_idt230"]') ||
-                                document.querySelector('input[name*="j_idt243"]') ||
-                                document.querySelector('input[name*="j_idt252"]');
+                    const btn = document.querySelector('input[value="Ver formulario"]');
                     if (btn) btn.click();
                 """)
                 
                 # Esperar activamente la llegada del PDF real
-                for _ in range(18):
+                for second in range(20):
                     if captured_real_pdf and captured_real_pdf.startswith(b"%PDF"):
                         break
+                    if second in [4, 9, 14]:
+                        await page.evaluate("""
+                            const btn = document.querySelector('input[value="Ver formulario"]');
+                            if (btn) btn.click();
+                        """)
                     await asyncio.sleep(1)
                 
                 if not captured_real_pdf or not captured_real_pdf.startswith(b"%PDF"):
@@ -366,7 +372,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 with open(pdf_path, "wb") as f:
                     f.write(captured_real_pdf)
                     
-                print(f"✔ ARCHIVO PDF AUTÉNTICO GUARDADO: {pdf_path} ({len(captured_real_pdf)} bytes)")
+                print(f"[Exito] Archivo PDF autentico guardado: {pdf_path} ({len(captured_real_pdf)} bytes)")
                 
                 sessions[session_id] = {
                     "pdf_path": pdf_path,
@@ -454,27 +460,33 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
                 "newCaptcha": new_b64
             }
             
-        await page.evaluate("""
-            const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
-            if (btn) btn.click();
-            else if (window.si) window.si();
-        """)
-        await page.wait_for_timeout(3000)
+        try:
+            async with page.expect_response(lambda r: "formulario.jsf" in r.url and r.status == 200, timeout=20000):
+                await page.evaluate("""
+                    const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
+                    if (btn) btn.click();
+                    else if (window.si) window.si();
+                """)
+        except Exception:
+            await page.wait_for_timeout(3000)
+            
+        await page.wait_for_timeout(2000)
         
         await page.evaluate("""
-            const btn = document.querySelector('input[value="Ver formulario"]') || 
-                        document.querySelector('input[name*="j_idt242"]') ||
-                        document.querySelector('input[name*="j_idt230"]') ||
-                        document.querySelector('input[name*="j_idt243"]') ||
-                        document.querySelector('input[name*="j_idt252"]');
+            const btn = document.querySelector('input[value="Ver formulario"]');
             if (btn) btn.click();
         """)
         
         captured_pdf = None
-        for _ in range(18):
+        for second in range(20):
             captured_pdf = session["get_pdf_ref"]()
             if captured_pdf and captured_pdf.startswith(b"%PDF"):
                 break
+            if second in [4, 9, 14]:
+                await page.evaluate("""
+                    const btn = document.querySelector('input[value="Ver formulario"]');
+                    if (btn) btn.click();
+                """)
             await asyncio.sleep(1)
             
         if not captured_pdf or not captured_pdf.startswith(b"%PDF"):
