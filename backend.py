@@ -34,8 +34,7 @@ sessions: Dict[str, dict] = {}
 DOWNLOADS_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-# Semáforo para controlar concurrencia en servidores con recursos compartidos
-CONCURRENCY_LIMIT = 3
+CONCURRENCY_LIMIT = 4
 concurrency_semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
 playwright_instance = None
@@ -49,7 +48,7 @@ async def startup_event():
         headless=True,
         args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     )
-    print("🚀 Motor de navegación para denuncias judiciales iniciado.")
+    print("🚀 Motor de navegación para denuncias judiciales iniciado y listo.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -163,12 +162,11 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
     async with concurrency_semaphore:
         context = await browser_instance.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="es-EC",
-            accept_downloads=True
+            locale="es-EC"
         )
         page = await context.new_page()
         
-        # Interceptor de red y escucha de descargas para capturar el PDF real
+        # Captura directa y limpia del PDF oficial sin interferir con otros recursos
         captured_real_pdf = None
         
         async def route_interceptor(route, request):
@@ -180,7 +178,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     body = await response.body()
                     if body.startswith(b"%PDF"):
                         captured_real_pdf = body
-                        print(f"✔ PDF OFICIAL REAL CAPTURADO DE LA JUDICATURA (VÍA RED): {len(body)} bytes")
+                        print(f"✔ PDF OFICIAL REAL CAPTURADO DE LA JUDICATURA: {len(body)} bytes")
                 await route.fulfill(response=response)
             except Exception:
                 try:
@@ -188,25 +186,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 except Exception:
                     pass
             
-        await page.route("**/documentosExtraviados/**", route_interceptor)
-        
-        # Escucha alternativa por si el navegador lo envía como evento Download
-        async def on_download(download):
-            nonlocal captured_real_pdf
-            try:
-                temp_file = os.path.join(DOWNLOADS_DIR, f"temp_{uuid.uuid4().hex}.pdf")
-                await download.save_as(temp_file)
-                with open(temp_file, "rb") as f:
-                    data = f.read()
-                    if data.startswith(b"%PDF"):
-                        captured_real_pdf = data
-                        print(f"✔ PDF OFICIAL REAL CAPTURADO (VÍA DESCARGA): {len(data)} bytes")
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except Exception as e:
-                print(f"Error procesando descarga: {e}")
-                
-        page.on("download", on_download)
+        await page.route("**/formulario.jsf*", route_interceptor)
         
         try:
             print(f"Cargando portal judicial para cédula {cedula}...")
@@ -350,7 +330,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
                     await page.wait_for_timeout(1500)
                     
-            # 7. Confirmar en la Judicatura y descargar el PDF REAL con bucle de espera adaptativo
+            # 7. Confirmar en la Judicatura y descargar el PDF REAL
             if solved_successfully:
                 print("Confirmando denuncia de forma real en la Judicatura (clic en Si)...")
                 await page.evaluate("""
@@ -358,34 +338,28 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     if (btn) btn.click();
                     else if (window.si) window.si();
                 """)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(3500)
                 
-                print("Solicitando el PDF oficial generado por el servidor judicial...")
+                print("Haciendo clic en el botón oficial 'Ver formulario'...")
                 await page.evaluate("""
                     const btn = document.querySelector('input[value="Ver formulario"]') || 
                                 document.querySelector('input[name*="j_idt242"]') ||
+                                document.querySelector('input[name*="j_idt230"]') ||
+                                document.querySelector('input[name*="j_idt243"]') ||
                                 document.querySelector('input[name*="j_idt252"]');
                     if (btn) btn.click();
                 """)
                 
-                # Bucle de espera adaptativo (hasta 25 segundos) con reintento de clic si es necesario
-                for second in range(25):
+                # Esperar activamente la llegada del PDF real
+                for _ in range(18):
                     if captured_real_pdf and captured_real_pdf.startswith(b"%PDF"):
                         break
-                    if second in [4, 9, 15]:
-                        print(f"[Espera PDF] Reintentando clic en 'Ver formulario' (segundo {second})...")
-                        await page.evaluate("""
-                            const btn = document.querySelector('input[value="Ver formulario"]') || 
-                                        document.querySelector('input[name*="j_idt242"]') ||
-                                        document.querySelector('input[name*="j_idt252"]');
-                            if (btn) btn.click();
-                        """)
                     await asyncio.sleep(1)
                 
                 if not captured_real_pdf or not captured_real_pdf.startswith(b"%PDF"):
                     raise HTTPException(
                         status_code=502,
-                        detail="El servidor de la Judicatura tardó más de lo esperado en emitir el PDF. Por favor reintente en unos segundos."
+                        detail="El servidor de la Judicatura no entregó el PDF a tiempo. Por favor reintente en unos segundos."
                     )
                     
                 pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
@@ -489,23 +463,18 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
         
         await page.evaluate("""
             const btn = document.querySelector('input[value="Ver formulario"]') || 
-                        document.querySelector('input*["j_idt242"]') ||
-                        document.querySelector('input*["j_idt252"]');
+                        document.querySelector('input[name*="j_idt242"]') ||
+                        document.querySelector('input[name*="j_idt230"]') ||
+                        document.querySelector('input[name*="j_idt243"]') ||
+                        document.querySelector('input[name*="j_idt252"]');
             if (btn) btn.click();
         """)
         
         captured_pdf = None
-        for second in range(25):
+        for _ in range(18):
             captured_pdf = session["get_pdf_ref"]()
             if captured_pdf and captured_pdf.startswith(b"%PDF"):
                 break
-            if second in [4, 9, 15]:
-                await page.evaluate("""
-                    const btn = document.querySelector('input[value="Ver formulario"]') || 
-                                document.querySelector('input[name*="j_idt242"]') ||
-                                document.querySelector('input[name*="j_idt252"]');
-                    if (btn) btn.click();
-                """)
             await asyncio.sleep(1)
             
         if not captured_pdf or not captured_pdf.startswith(b"%PDF"):
