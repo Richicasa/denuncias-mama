@@ -177,7 +177,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     body = await response.body()
                     if body.startswith(b"%PDF"):
                         captured_real_pdf = body
-                        print(f"[Captura PDF] Archivo PDF oficial recibido con exito ({len(body)} bytes)")
+                        print(f"[Captura PDF] Archivo PDF oficial recibido ({len(body)} bytes)")
                 await route.fulfill(response=response)
             except Exception:
                 try:
@@ -195,7 +195,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             # 1. Cédula y consulta a Registro Civil
             await page.fill("#numeroIdentificacion", cedula)
             await page.locator("#numeroIdentificacion").blur()
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1800)
             
             nombre = await page.input_value("#nombreCompleto")
             if not nombre:
@@ -234,12 +234,12 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     input.dispatchEvent(new Event('blur', {{ bubbles: true }}));
                 }}
             """)
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(400)
             
             # 5. Agregar documento Cédula a la tabla oficial de la Judicatura
             print("Registrando documento extraviado en la tabla oficial...")
             await page.locator('input[value="+ Agregar un nuevo documento"]').click(force=True)
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(800)
             
             await page.evaluate(f"""
                 if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {{
@@ -263,13 +263,13 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     desc.dispatchEvent(new Event('blur', {{ bubbles: true }}));
                 }}
             """)
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(600)
             
             await page.evaluate("""
                 const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
                 if (btn) btn.click();
             """)
-            await page.wait_for_timeout(2500)
+            await page.wait_for_timeout(2000)
             
             # Limpieza de sombra
             await page.evaluate("""
@@ -279,10 +279,10 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 const shade = document.getElementById('frmPopups:createPane_shade');
                 if (shade) shade.remove();
             """)
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(400)
             
-            # 6. Intentar resolver el Captcha automáticamente
-            max_attempts = 5
+            # 6. Intentar resolver el Captcha automáticamente (hasta 12 intentos)
+            max_attempts = 12
             solved_successfully = False
             last_captcha_b64 = ""
             
@@ -295,10 +295,10 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 last_captcha_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
                 
                 auto_code = solve_captcha_image(captcha_bytes)
-                if not auto_code or len(auto_code) < 4:
+                if not auto_code or len(auto_code) < 5:
                     print(f"[Intento {attempt+1}] Captcha dudoso, refrescando...")
                     await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
-                    await page.wait_for_timeout(1500)
+                    await page.wait_for_timeout(1000)
                     continue
                     
                 print(f"[Intento {attempt+1}] Enviando código OCR: '{auto_code}'")
@@ -308,7 +308,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
                     if (btn) btn.click();
                 """)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(2500)
                 
                 confirm_modal_visible = await page.evaluate("""
                     (function() {
@@ -327,23 +327,20 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 else:
                     print(f"[Intento {attempt+1}] Captcha no válido para la Judicatura, refrescando...")
                     await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
-                    await page.wait_for_timeout(1500)
+                    await page.wait_for_timeout(1000)
                     
-            # 7. Confirmar en la Judicatura con sincronización AJAX y descargar el PDF REAL
+            # 7. Confirmar en la Judicatura y descargar el PDF REAL
             if solved_successfully:
                 print("Confirmando denuncia de forma real en la Judicatura (clic en Si)...")
-                try:
-                    async with page.expect_response(lambda r: "formulario.jsf" in r.url and r.status == 200, timeout=20000):
-                        await page.evaluate("""
-                            const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
-                            if (btn) btn.click();
-                            else if (window.si) window.si();
-                        """)
-                except Exception:
-                    await page.wait_for_timeout(3000)
-                    
-                print("Esperando renderizado del modal del PDF oficial...")
-                await page.wait_for_timeout(2000)
+                await page.evaluate("""
+                    if (window.si) {
+                        window.si();
+                    } else {
+                        const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
+                        if (btn) btn.click();
+                    }
+                """)
+                await page.wait_for_timeout(3500)
                 
                 print("Haciendo clic en el botón oficial 'Ver formulario'...")
                 await page.evaluate("""
@@ -351,15 +348,10 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     if (btn) btn.click();
                 """)
                 
-                # Esperar activamente la llegada del PDF real
-                for second in range(20):
+                # Esperar pasivamente la llegada del PDF real
+                for _ in range(18):
                     if captured_real_pdf and captured_real_pdf.startswith(b"%PDF"):
                         break
-                    if second in [4, 9, 14]:
-                        await page.evaluate("""
-                            const btn = document.querySelector('input[value="Ver formulario"]');
-                            if (btn) btn.click();
-                        """)
                     await asyncio.sleep(1)
                 
                 if not captured_real_pdf or not captured_real_pdf.startswith(b"%PDF"):
@@ -436,7 +428,7 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
             const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
             if (btn) btn.click();
         """)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(2500)
         
         confirm_modal_visible = await page.evaluate("""
             (function() {
@@ -460,17 +452,15 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
                 "newCaptcha": new_b64
             }
             
-        try:
-            async with page.expect_response(lambda r: "formulario.jsf" in r.url and r.status == 200, timeout=20000):
-                await page.evaluate("""
-                    const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
-                    if (btn) btn.click();
-                    else if (window.si) window.si();
-                """)
-        except Exception:
-            await page.wait_for_timeout(3000)
-            
-        await page.wait_for_timeout(2000)
+        await page.evaluate("""
+            if (window.si) {
+                window.si();
+            } else {
+                const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
+                if (btn) btn.click();
+            }
+        """)
+        await page.wait_for_timeout(3500)
         
         await page.evaluate("""
             const btn = document.querySelector('input[value="Ver formulario"]');
@@ -478,15 +468,10 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
         """)
         
         captured_pdf = None
-        for second in range(20):
+        for _ in range(18):
             captured_pdf = session["get_pdf_ref"]()
             if captured_pdf and captured_pdf.startswith(b"%PDF"):
                 break
-            if second in [4, 9, 14]:
-                await page.evaluate("""
-                    const btn = document.querySelector('input[value="Ver formulario"]');
-                    if (btn) btn.click();
-                """)
             await asyncio.sleep(1)
             
         if not captured_pdf or not captured_pdf.startswith(b"%PDF"):
