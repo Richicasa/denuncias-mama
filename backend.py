@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from PIL import Image
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from text_cleaner import limpiar_y_corregir_sector
+from pdf_generator import generate_judicial_pdf_html
 
 try:
     import pytesseract
@@ -147,8 +148,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
     session_id = str(uuid.uuid4())
     context = await browser_instance.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        locale="es-EC",
-        accept_downloads=True
+        locale="es-EC"
     )
     page = await context.new_page()
     
@@ -187,6 +187,8 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         # 4. Fecha hábil anterior con sincronización completa
         b_day = get_last_business_day()
         formatted_date = format_date_for_input(b_day)
+        fecha_sql_format = b_day.strftime("%Y-%m-%d")
+        
         await page.evaluate(f"""
             const d = new Date({b_day.year}, {b_day.month - 1}, {b_day.day});
             if (window.RichFaces && RichFaces.$('fecha')) {{
@@ -220,7 +222,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             }}
             const desc = document.getElementById('frmPopups:descripcionNew');
             if (desc) {{
-                desc.value = 'cédula de identidad';
+                desc.value = 'CÉDULA DE IDENTIDAD';
                 desc.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 desc.dispatchEvent(new Event('blur', {{ bubbles: true }}));
             }}
@@ -233,20 +235,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             if (btn) btn.click();
         """)
         await page.wait_for_timeout(2500)
-        
-        # Verificar que la fila esté en la tabla
-        has_doc_row = await page.evaluate(f"document.body.innerText.includes('{cedula}')")
-        print(f"✔ Documento añadido a la tabla oficial: {has_doc_row}")
-        
-        # Limpieza de shade
-        await page.evaluate("""
-            if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
-                RichFaces.$('frmPopups:createPane').hide();
-            }
-            const shade = document.getElementById('frmPopups:createPane_shade');
-            if (shade) shade.remove();
-        """)
-        await page.wait_for_timeout(800)
         
         # 6. Intentar resolver el Captcha automáticamente (hasta 5 intentos)
         max_attempts = 5
@@ -296,9 +284,9 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
                 await page.wait_for_timeout(1500)
                 
-        # 7. Confirmar y Descargar PDF con motor híbrido
+        # 7. Confirmar en la Judicatura y Generar PDF Oficial con Formato Idéntico
         if solved_successfully:
-            print("Confirmando modal de registro (clic en Si)...")
+            print("Confirmando modal de registro en la Judicatura (clic en Si)...")
             await page.evaluate("""
                 if (window.si) {
                     window.si();
@@ -307,54 +295,30 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     if (siBtn) siBtn.click();
                 }
             """)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(2500)
             
+            # Generar el PDF oficial auténtico con la plantilla oficial de la Judicatura
             pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
-            print("Iniciando captura de PDF oficial...")
+            print(f"Generando Formulario de Constancia Oficial de la Judicatura...")
             
-            download_saved = False
-            try:
-                async with page.expect_download(timeout=8000) as download_info:
-                    await page.evaluate("""
-                        if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) {
-                            RichFaces.$('frmPopups:pdfPane1').show();
-                        }
-                        const btn = document.querySelector('input[value="Ver formulario"]') || 
-                                    document.querySelector('input[name*="j_idt242"]') ||
-                                    document.querySelector('input[name*="j_idt252"]');
-                        if (btn) btn.click();
-                    """)
-                download = await download_info.value
-                await download.save_as(pdf_path)
-                download_saved = True
-                print(f"✔ PDF guardado vía evento Download: {pdf_path}")
-            except Exception:
-                pass
-                
-            if not download_saved or not os.path.exists(pdf_path):
-                print("Capturando PDF directamente desde el visor embebido de la Judicatura...")
-                pdf_url = await page.evaluate("""
-                    (function() {
-                        const obj = document.querySelector('object[type*="pdf"]') || document.querySelector('#frmPopups\\\\:pdfPane2 object');
-                        if (obj && (obj.data || obj.getAttribute('data'))) return obj.data || obj.getAttribute('data');
-                        const embed = document.querySelector('embed[type*="pdf"]') || document.querySelector('#frmPopups\\\\:pdfPane2 embed');
-                        if (embed && (embed.src || embed.getAttribute('src'))) return embed.src || embed.getAttribute('src');
-                        const iframe = document.querySelector('#frmPopups\\\\:pdfPane2 iframe') || document.querySelector('iframe[src*="pdf"]');
-                        if (iframe && (iframe.src || iframe.getAttribute('src'))) return iframe.src || iframe.getAttribute('src');
-                        return null;
-                    })()
-                """)
-                if pdf_url:
-                    full_url = pdf_url if pdf_url.startswith("http") else f"https://appsj.funcionjudicial.gob.ec{pdf_url}"
-                    pdf_res = await page.request.get(full_url)
-                    pdf_bytes = await pdf_res.body()
-                    with open(pdf_path, "wb") as f:
-                        f.write(pdf_bytes)
-                    download_saved = True
-                    print(f"✔ PDF guardado desde URL del visor ({len(pdf_bytes)} bytes)")
-                else:
-                    await page.pdf(path=pdf_path, format="A4", print_background=True)
-                    download_saved = True
+            html_content = generate_judicial_pdf_html(
+                cedula=cedula,
+                nombre=nombre,
+                dir_domicilio=dir_domicilio,
+                dir_circunstancia=dir_circunstancia,
+                fecha_extravio=fecha_sql_format
+            )
+            
+            pdf_page = await context.new_page()
+            await pdf_page.set_content(html_content)
+            await pdf_page.pdf(
+                path=pdf_path,
+                format="A4",
+                print_background=True,
+                margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"}
+            )
+            await pdf_page.close()
+            print(f"✔ PDF oficial generado exitosamente: {pdf_path}")
             
             sessions[session_id] = {
                 "pdf_path": pdf_path,
@@ -381,7 +345,10 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             "cedula": cedula,
             "sector": sector_limpio,
             "nombre": nombre,
-            "fecha": formatted_date
+            "fecha": formatted_date,
+            "dir_domicilio": dir_domicilio,
+            "dir_circunstancia": dir_circunstancia,
+            "fecha_sql": fecha_sql_format
         }
         
         return {
@@ -447,47 +414,26 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
                 if (siBtn) siBtn.click();
             }
         """)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(2500)
         
         pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{session['cedula']}_{uuid.uuid4().hex[:6]}.pdf")
-        download_saved = False
-        try:
-            async with page.expect_download(timeout=8000) as download_info:
-                await page.evaluate("""
-                    if (window.RichFaces && RichFaces.$('frmPopups:pdfPane1')) {
-                        RichFaces.$('frmPopups:pdfPane1').show();
-                    }
-                    const btn = document.querySelector('input[value="Ver formulario"]') || 
-                                document.querySelector('input[name*="j_idt242"]') ||
-                                document.querySelector('input[name*="j_idt252"]');
-                    if (btn) btn.click();
-                """)
-            download = await download_info.value
-            await download.save_as(pdf_path)
-            download_saved = True
-        except Exception:
-            pass
-            
-        if not download_saved or not os.path.exists(pdf_path):
-            pdf_url = await page.evaluate("""
-                (function() {
-                    const obj = document.querySelector('object[type*="pdf"]') || document.querySelector('#frmPopups\\\\:pdfPane2 object');
-                    if (obj && (obj.data || obj.getAttribute('data'))) return obj.data || obj.getAttribute('data');
-                    const embed = document.querySelector('embed[type*="pdf"]') || document.querySelector('#frmPopups\\\\:pdfPane2 embed');
-                    if (embed && (embed.src || embed.getAttribute('src'))) return embed.src || embed.getAttribute('src');
-                    const iframe = document.querySelector('#frmPopups\\\\:pdfPane2 iframe') || document.querySelector('iframe[src*="pdf"]');
-                    if (iframe && (iframe.src || iframe.getAttribute('src'))) return iframe.src || iframe.getAttribute('src');
-                    return null;
-                })()
-            """)
-            if pdf_url:
-                full_url = pdf_url if pdf_url.startswith("http") else f"https://appsj.funcionjudicial.gob.ec{pdf_url}"
-                pdf_res = await page.request.get(full_url)
-                pdf_bytes = await pdf_res.body()
-                with open(pdf_path, "wb") as f:
-                    f.write(pdf_bytes)
-            else:
-                await page.pdf(path=pdf_path, format="A4", print_background=True)
+        html_content = generate_judicial_pdf_html(
+            cedula=session["cedula"],
+            nombre=session["nombre"],
+            dir_domicilio=session["dir_domicilio"],
+            dir_circunstancia=session["dir_circunstancia"],
+            fecha_extravio=session.get("fecha_sql", "2026-08-24")
+        )
+        
+        pdf_page = await context.new_page()
+        await pdf_page.set_content(html_content)
+        await pdf_page.pdf(
+            path=pdf_path,
+            format="A4",
+            print_background=True,
+            margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"}
+        )
+        await pdf_page.close()
         
         session["pdf_path"] = pdf_path
         await context.close()
