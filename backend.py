@@ -157,7 +157,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await page.goto("https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf", timeout=45000)
         await page.wait_for_load_state("networkidle")
         
-        # 1. Cédula
+        # 1. Cédula y consulta a Registro Civil
         await page.fill("#numeroIdentificacion", cedula)
         await page.locator("#numeroIdentificacion").blur()
         await page.wait_for_timeout(2000)
@@ -184,7 +184,7 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         await page.select_option("#cantonExtravio", label="QUITO")
         await page.fill("#direccionCircunstancia", dir_circunstancia)
         
-        # 4. Fecha hábil anterior
+        # 4. Fecha hábil anterior con sincronización completa
         b_day = get_last_business_day()
         formatted_date = format_date_for_input(b_day)
         await page.evaluate(f"""
@@ -193,36 +193,58 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 RichFaces.$('fecha').setValue(d);
             }}
             const input = document.getElementById('fechaInputDate');
-            if (input) input.value = '{formatted_date}';
+            if (input) {{
+                input.value = '{formatted_date}';
+                input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                input.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+            }}
         """)
+        await page.wait_for_timeout(500)
         
-        # 5. Agregar documento Cédula
+        # 5. Agregar documento Cédula con eventos JSF garantizados
+        print("Agregando documento extraviado en la tabla...")
         add_btn = page.locator('input[value="+ Agregar un nuevo documento"]')
         await add_btn.click(force=True)
         await page.wait_for_timeout(1500)
         
-        await page.evaluate("if (window.RichFaces && RichFaces.$('frmPopups:createPane')) RichFaces.$('frmPopups:createPane').show();")
+        # Seleccionar Tipo 7 (Cédula) y emitir evento change
+        await page.select_option("#frmPopups\\:tipoDocumentoExtraviadoNewSelect", value="7")
+        await page.evaluate("""
+            const sel = document.getElementById('frmPopups:tipoDocumentoExtraviadoNewSelect');
+            if (sel) sel.dispatchEvent(new Event('change', { bubbles: true }));
+        """)
         await page.wait_for_timeout(800)
         
-        await page.select_option('select[id*="tipoDocumentoExtraviadoNewSelect"]', value="7")
-        await page.wait_for_timeout(800)
-        await page.fill('input[id*="numeroNew"]', cedula)
-        await page.fill('textarea[id*="descripcionNew"]', "cédula de identidad")
+        # Llenar número de cédula y emitir change/blur
+        await page.fill("#frmPopups\\:numeroNew", cedula)
+        await page.evaluate("""
+            const num = document.getElementById('frmPopups:numeroNew');
+            if (num) {
+                num.dispatchEvent(new Event('change', { bubbles: true }));
+                num.dispatchEvent(new Event('blur', { bubbles: true }));
+            }
+        """)
+        await page.wait_for_timeout(500)
         
+        # Llenar descripción y emitir change
+        await page.fill("#frmPopups\\:descripcionNew", "cédula de identidad")
+        await page.evaluate("""
+            const desc = document.getElementById('frmPopups:descripcionNew');
+            if (desc) desc.dispatchEvent(new Event('change', { bubbles: true }));
+        """)
+        await page.wait_for_timeout(500)
+        
+        # Clic en Aceptar dentro del popup
         accept_doc_btn = page.locator('#frmPopups\\:createPane input[value="Aceptar"]')
         await accept_doc_btn.click(force=True)
-        await page.wait_for_timeout(2000)
         
-        # Limpieza forzada de sombra
-        await page.evaluate("""
-            if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
-                RichFaces.$('frmPopups:createPane').hide();
-            }
-            const shade = document.getElementById('frmPopups:createPane_shade');
-            if (shade) shade.remove();
-        """)
-        await page.wait_for_timeout(1000)
-        
+        # Esperar a que la fila aparezca en la tabla de documentos
+        try:
+            await page.wait_for_function(f"document.body.innerText.includes('{cedula}')", timeout=6000)
+            print("✔ Documento confirmado en la tabla oficial.")
+        except Exception:
+            await page.wait_for_timeout(2500)
+            
         # 6. Intentar resolver el Captcha automáticamente (hasta 5 intentos)
         max_attempts = 5
         solved_successfully = False
@@ -287,7 +309,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
             print("Iniciando captura de PDF oficial...")
             
-            # Intento 1: Descarga directa por evento de descarga
             download_saved = False
             try:
                 async with page.expect_download(timeout=8000) as download_info:
@@ -307,7 +328,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             except Exception:
                 pass
                 
-            # Intento 2: Captura directa desde el visor PDF embebido de la Judicatura (pdfPane2)
             if not download_saved or not os.path.exists(pdf_path):
                 print("Capturando PDF directamente desde el visor embebido de la Judicatura...")
                 pdf_url = await page.evaluate("""
@@ -330,10 +350,8 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     download_saved = True
                     print(f"✔ PDF guardado desde URL del visor ({len(pdf_bytes)} bytes)")
                 else:
-                    # Intento 3: Exportar el comprobante oficial en PDF
                     await page.pdf(path=pdf_path, format="A4", print_background=True)
                     download_saved = True
-                    print(f"✔ PDF oficial exportado directamente")
             
             sessions[session_id] = {
                 "pdf_path": pdf_path,
