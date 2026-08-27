@@ -1,0 +1,30 @@
+====================================================================
+      GUÍA PARA INSTALAR EL BOT EN TU COMPUTADORA LINUX
+====================================================================
+
+Solo necesitas seguir estos 3 pasos rápidos en tu computadora Linux:
+
+PASO 1: Copia esta carpeta completa ('paquete_linux_servidor') a tu compu Linux.
+        (Puedes usar una memoria USB o pasarla por Google Drive / red local).
+
+PASO 2: Abre una Terminal en esa carpeta y dale permisos ejecutando:
+        chmod +x *.sh
+
+PASO 3: Ejecuta la instalación inicial (solo se hace una vez):
+        ./instalar_todo.sh
+
+--------------------------------------------------------------------
+¿CÓMO INICIAR EL BOT?
+--------------------------------------------------------------------
+Para iniciar el bot normalmente:
+        ./iniciar_bot.sh
+
+--------------------------------------------------------------------
+¿QUIERES QUE ARRANQUE SOLO CADA VEZ QUE ENCIENDAS LA PC? (OPCIONAL)
+--------------------------------------------------------------------
+Ejecuta:
+        ./configurar_inicio_automatico_24_7.sh
+
+¡Y listo! Tu mamá podrá escribirle a @denuncias_mama_bot a cualquier hora
+y recibir los PDFs oficiales al instante.
+====================================================================
