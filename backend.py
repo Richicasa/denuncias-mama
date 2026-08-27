@@ -15,6 +15,15 @@ from PIL import Image
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from text_cleaner import limpiar_y_corregir_sector
 
+from telegram import Update, InputFile
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters
+)
+
 try:
     import winocr
 except ImportError:
@@ -36,6 +45,7 @@ app.add_middleware(
 )
 
 sessions: Dict[str, dict] = {}
+user_telegram_states: Dict[int, dict] = {}
 DOWNLOADS_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
@@ -44,24 +54,12 @@ concurrency_semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
 playwright_instance = None
 browser_instance: Browser = None
+telegram_application = None
 
-@app.on_event("startup")
-async def startup_event():
-    global playwright_instance, browser_instance
-    playwright_instance = await async_playwright().start()
-    browser_instance = await playwright_instance.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-    )
-    print("🚀 Motor de navegación para denuncias judiciales iniciado y listo.", flush=True)
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    global playwright_instance, browser_instance
-    if browser_instance:
-        await browser_instance.close()
-    if playwright_instance:
-        await playwright_instance.stop()
+TELEGRAM_TOKEN = os.environ.get(
+    "TELEGRAM_BOT_TOKEN",
+    "8841299245:AAHqhY1cCFDqAE0V_Np89h1ORPKb3TqGBbI"
+)
 
 def get_last_business_day(today=None):
     if today is None:
@@ -175,7 +173,7 @@ async def ejecutar_denuncia_directa(cedula: str, raw_sector: str):
                 
             if not valid_code:
                 await context.close()
-                return False, "No se pudo leer el captcha de la Judicatura.", None
+                return False, "No se pudo leer un captcha nítido de la Judicatura.", None
                 
             # Cédula
             await page.fill("#numeroIdentificacion", cedula)
@@ -330,7 +328,7 @@ async def ejecutar_denuncia_directa(cedula: str, raw_sector: str):
                     "pdf_bytes": captured_real_pdf
                 }, None
             else:
-                return False, "La Judicatura no entregó el flujo binario del PDF.", None
+                return False, "La Judicatura tardó en entregar el flujo PDF.", None
                 
         except Exception as e:
             try:
@@ -339,16 +337,144 @@ async def ejecutar_denuncia_directa(cedula: str, raw_sector: str):
                 pass
             return False, str(e), None
 
+# --- TELEGRAM BOT HANDLERS ---
+async def tg_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_text = (
+        "👋 **¡Hola! Soy tu Asistente para Denuncias Judiciales de Extravío.**\n\n"
+        "Puedo generar tu denuncia oficial del Consejo de la Judicatura y enviarte el PDF listo para imprimir.\n\n"
+        "📝 **Para comenzar, envíame:**\n"
+        "• El número de **Cédula** (10 dígitos)\n"
+        "• El **Sector o Lugar** del extravío (ej: *El Recreo*, *Quitumbe*, *Centro Histórico*)\n\n"
+        "💡 *Ejemplo:* `1708927502 Sector El Recreo`"
+    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+
+async def tg_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    cedula_match = re.search(r'\b\d{10}\b', text)
+    
+    if cedula_match:
+        cedula = cedula_match.group(0)
+        sector_candidate = text.replace(cedula, "").strip()
+        sector_candidate = re.sub(r'^(en el|en|sector|el|la)\s+', '', sector_candidate, flags=re.IGNORECASE).strip()
+        
+        if sector_candidate and len(sector_candidate) > 2:
+            await tg_procesar_y_responder(update, cedula, sector_candidate)
+        else:
+            user_telegram_states[user_id] = {"cedula": cedula}
+            await update.message.reply_text(
+                f"✅ Cédula recibida: `{cedula}`\n\n"
+                "📍 ¿En qué **sector o lugar** ocurrió el extravío?\n"
+                "*(Ejemplo: El Recreo, Chillogallo, La Mariscal, Centro Histórico...)*",
+                parse_mode="Markdown"
+            )
+        return
+        
+    if user_id in user_telegram_states and "cedula" in user_telegram_states[user_id]:
+        cedula = user_telegram_states[user_id]["cedula"]
+        sector = text
+        del user_telegram_states[user_id]
+        await tg_procesar_y_responder(update, cedula, sector)
+        return
+        
+    await update.message.reply_text(
+        "Por favor indícame el número de cédula (10 dígitos).\n"
+        "Ejemplo: `1708927502 Sector El Recreo`",
+        parse_mode="Markdown"
+    )
+
+async def tg_procesar_y_responder(update: Update, cedula: str, sector: str):
+    msg_espera = await update.message.reply_text(
+        f"⏳ **Generando denuncia oficial ante el Consejo de la Judicatura...**\n"
+        f"🆔 Cédula: `{cedula}`\n"
+        f"📍 Sector: `{sector}`\n\n"
+        f"*Esto toma aproximadamente 13 segundos...*",
+        parse_mode="Markdown"
+    )
+    
+    t0 = time.time()
+    success, result, _ = await ejecutar_denuncia_directa(cedula, sector)
+    elapsed = time.time() - t0
+    
+    if success:
+        pdf_bytes = result["pdf_bytes"]
+        nombre = result["nombre"]
+        sector_fmt = result["sector"]
+        
+        caption = (
+            f"✅ **¡DENUNCIA GENERADA CON ÉXITO!** ({elapsed:.1f}s)\n\n"
+            f"👤 **Nombre:** {nombre}\n"
+            f"🆔 **Cédula:** `{cedula}`\n"
+            f"📍 **Lugar:** {sector_fmt}\n\n"
+            f"📄 *Documento oficial emitido por el Consejo de la Judicatura (válido para trámites legales y Registro Civil).* "
+        )
+        
+        pdf_file = io.BytesIO(pdf_bytes)
+        pdf_file.name = f"Denuncia_{cedula}.pdf"
+        
+        await update.message.reply_document(
+            document=InputFile(pdf_file, filename=f"Denuncia_{cedula}.pdf"),
+            caption=caption,
+            parse_mode="Markdown"
+        )
+        try:
+            await msg_espera.delete()
+        except Exception:
+            pass
+    else:
+        error_msg = result if isinstance(result, str) else "Error al generar la denuncia."
+        await update.message.reply_text(
+            f"❌ **No se pudo completar la emisión:**\n{error_msg}\n\n"
+            f"Por favor reenvía los datos para reintentar.",
+            parse_mode="Markdown"
+        )
+
+# --- FASTAPI LIFECYCLE ---
+@app.on_event("startup")
+async def startup_event():
+    global playwright_instance, browser_instance, telegram_application
+    playwright_instance = await async_playwright().start()
+    browser_instance = await playwright_instance.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    )
+    print("🚀 Motor de navegación para denuncias judiciales iniciado.", flush=True)
+    
+    if TELEGRAM_TOKEN:
+        try:
+            telegram_application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+            telegram_application.add_handler(CommandHandler("start", tg_start_command))
+            telegram_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_message))
+            await telegram_application.initialize()
+            await telegram_application.start()
+            await telegram_application.updater.start_polling()
+            print(f"🤖 Bot de Telegram conectado y activo 24/7 en la nube (@denuncias_mama_bot)", flush=True)
+        except Exception as e:
+            print(f"Error iniciando bot de Telegram: {e}", flush=True)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global playwright_instance, browser_instance, telegram_application
+    if telegram_application:
+        try:
+            await telegram_application.updater.stop()
+            await telegram_application.stop()
+            await telegram_application.shutdown()
+        except Exception:
+            pass
+    if browser_instance:
+        await browser_instance.close()
+    if playwright_instance:
+        await playwright_instance.stop()
+
 class AutoDenunciaRequest(BaseModel):
     cedula: str
     sector: str
 
 class PreviewSectorRequest(BaseModel):
     sector: str
-
-class SubmitManualCaptchaRequest(BaseModel):
-    session_id: str
-    captcha_text: str
 
 @app.api_route("/health", methods=["GET", "HEAD", "POST", "OPTIONS"])
 @app.api_route("/ping", methods=["GET", "HEAD", "POST", "OPTIONS"])
@@ -373,7 +499,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         raise HTTPException(status_code=400, detail="Debe indicar el sector o lugar del extravío")
         
     cleanup_old_downloads()
-    
     success, result, _ = await ejecutar_denuncia_directa(cedula, raw_sector)
     
     if success:
@@ -386,71 +511,6 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         }
     else:
         raise HTTPException(status_code=502, detail=result)
-
-@app.api_route("/api/whatsapp-webhook", methods=["GET", "POST"])
-async def whatsapp_webhook(request: Request, From: Optional[str] = Form(None), Body: Optional[str] = Form(None)):
-    """Webhook universal para WhatsApp (Twilio / Meta / Green-API)"""
-    cleanup_old_downloads()
-    
-    text_content = ""
-    if Body:
-        text_content = Body.strip()
-    else:
-        try:
-            json_data = await request.json()
-            # Green-API / Meta format
-            text_content = (
-                json_data.get("messageData", {}).get("textMessageData", {}).get("textMessage", "") or
-                json_data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages", [{}])[0].get("text", {}).get("body", "") or
-                json_data.get("body", "")
-            ).strip()
-        except Exception:
-            pass
-            
-    if not text_content:
-        twiml = "<Response><Message><Body>👋 ¡Hola! Por favor envíame el número de cédula y el sector para generar la denuncia oficial.\nEjemplo: 1708927502 Sector El Recreo</Body></Message></Response>"
-        return Response(content=twiml, media_type="application/xml")
-        
-    cedula_match = re.search(r'\b\d{10}\b', text_content)
-    if not cedula_match:
-        twiml = "<Response><Message><Body>⚠️ Por favor incluye un número de cédula válido de 10 dígitos.\nEjemplo: 1708927502 Sector El Recreo</Body></Message></Response>"
-        return Response(content=twiml, media_type="application/xml")
-        
-    cedula = cedula_match.group(0)
-    sector_raw = text_content.replace(cedula, "").strip()
-    sector_raw = re.sub(r'^(en el|en|sector|el|la)\s+', '', sector_raw, flags=re.IGNORECASE).strip()
-    if not sector_raw or len(sector_raw) < 2:
-        sector_raw = "Sector Centro"
-        
-    success, result, _ = await ejecutar_denuncia_directa(cedula, sector_raw)
-    
-    if success:
-        session_id = result["session_id"]
-        nombre = result["nombre"]
-        sector_fmt = result["sector"]
-        pdf_download_url = f"https://denuncias-mama.onrender.com/api/download-pdf/{session_id}"
-        
-        twiml = f"""<Response>
-    <Message>
-        <Body>✅ *¡DENUNCIA GENERADA CON ÉXITO!*
-👤 *Nombre:* {nombre}
-🆔 *Cédula:* {cedula}
-📍 *Lugar:* {sector_fmt}
-
-📄 *Descarga tu PDF Oficial:*
-{pdf_download_url}</Body>
-        <Media>{pdf_download_url}</Media>
-    </Message>
-</Response>"""
-        return Response(content=twiml, media_type="application/xml")
-    else:
-        twiml = f"""<Response>
-    <Message>
-        <Body>❌ *No se pudo emitir la denuncia:* {result}
-Por favor intenta de nuevo en unos momentos.</Body>
-    </Message>
-</Response>"""
-        return Response(content=twiml, media_type="application/xml")
 
 @app.get("/api/download-pdf/{session_id}")
 async def download_pdf(session_id: str):
