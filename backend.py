@@ -438,36 +438,17 @@ async def tg_procesar_y_responder(update: Update, cedula: str, sector: str):
 # --- FASTAPI LIFECYCLE ---
 @app.on_event("startup")
 async def startup_event():
-    global playwright_instance, browser_instance, telegram_application
+    global playwright_instance, browser_instance
     playwright_instance = await async_playwright().start()
     browser_instance = await playwright_instance.chromium.launch(
         headless=True,
         args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     )
     print("🚀 Motor de navegación para denuncias judiciales iniciado.", flush=True)
-    
-    if has_telegram and TELEGRAM_TOKEN:
-        try:
-            telegram_application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-            telegram_application.add_handler(CommandHandler("start", tg_start_command))
-            telegram_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_message))
-            await telegram_application.initialize()
-            await telegram_application.start()
-            await telegram_application.updater.start_polling()
-            print(f"🤖 Bot de Telegram conectado y activo 24/7 en la nube (@denuncias_mama_bot)", flush=True)
-        except Exception as e:
-            print(f"Error iniciando bot de Telegram: {e}", flush=True)
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global playwright_instance, browser_instance, telegram_application
-    if telegram_application:
-        try:
-            await telegram_application.updater.stop()
-            await telegram_application.stop()
-            await telegram_application.shutdown()
-        except Exception:
-            pass
+    global playwright_instance, browser_instance
     if browser_instance:
         await browser_instance.close()
     if playwright_instance:
