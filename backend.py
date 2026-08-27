@@ -6,8 +6,8 @@ import os
 import re
 import time
 import uuid
-from typing import Dict
-from fastapi import FastAPI, HTTPException, Request
+from typing import Dict, Optional
+from fastapi import FastAPI, Form, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -53,7 +53,7 @@ async def startup_event():
         headless=True,
         args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     )
-    print("🚀 Motor de navegación para denuncias judiciales iniciado y listo.")
+    print("🚀 Motor de navegación para denuncias judiciales iniciado y listo.", flush=True)
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -66,13 +66,13 @@ async def shutdown_event():
 def get_last_business_day(today=None):
     if today is None:
         today = datetime.date.today()
-    if today.weekday() == 0:    # Lunes -> Viernes (-3 días)
+    if today.weekday() == 0:
         delta = 3
-    elif today.weekday() == 6:  # Domingo -> Viernes (-2 días)
+    elif today.weekday() == 6:
         delta = 2
-    elif today.weekday() == 5:  # Sábado -> Viernes (-1 día)
+    elif today.weekday() == 5:
         delta = 1
-    else:                       # Martes a Viernes -> Ayer (-1 día)
+    else:
         delta = 1
     return today - datetime.timedelta(days=delta)
 
@@ -123,6 +123,222 @@ def cleanup_old_downloads():
     except Exception:
         pass
 
+async def ejecutar_denuncia_directa(cedula: str, raw_sector: str):
+    sector_info = limpiar_y_corregir_sector(raw_sector)
+    sector_limpio = sector_info["sector_limpio"]
+    dir_domicilio = sector_info["direccion_domicilio"]
+    dir_circunstancia = sector_info["direccion_circunstancia"]
+    
+    async with concurrency_semaphore:
+        context = await browser_instance.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="es-EC"
+        )
+        page = await context.new_page()
+        captured_real_pdf = None
+        
+        async def route_interceptor(route, request):
+            nonlocal captured_real_pdf
+            try:
+                response = await route.fetch()
+                ct = response.headers.get("content-type", "").lower()
+                if "application/pdf" in ct or "pdf" in ct:
+                    body = await response.body()
+                    if body.startswith(b"%PDF"):
+                        captured_real_pdf = body
+                await route.fulfill(response=response)
+            except Exception:
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+                    
+        await page.route("**/formulario.jsf*", route_interceptor)
+        
+        try:
+            await page.goto("https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf", timeout=45000)
+            await page.wait_for_load_state("networkidle")
+            
+            # Pre-validación Captcha
+            valid_code = ""
+            for _ in range(12):
+                c_el = await page.query_selector("#imgCaptchaId")
+                if not c_el:
+                    break
+                c_bytes = await c_el.screenshot()
+                c_text = await solve_captcha_image(c_bytes)
+                if len(c_text) == 6:
+                    valid_code = c_text
+                    break
+                await page.reload()
+                await page.wait_for_load_state("networkidle")
+                
+            if not valid_code:
+                await context.close()
+                return False, "No se pudo leer el captcha de la Judicatura.", None
+                
+            # Cédula
+            await page.fill("#numeroIdentificacion", cedula)
+            await page.locator("#numeroIdentificacion").blur()
+            await page.wait_for_timeout(1800)
+            
+            nombre = await page.input_value("#nombreCompleto")
+            if not nombre:
+                nombre = "CIUDADANO REGISTRADO"
+                
+            # Domicilio
+            await page.select_option("#provinciaDomicilio", value="17")
+            try:
+                await page.wait_for_function("document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=8000)
+            except Exception:
+                await page.wait_for_timeout(1500)
+            await page.select_option("#cantonDomicilio", label="QUITO")
+            await page.fill("#direccionDomicilio", dir_domicilio)
+            
+            # Extravío
+            await page.select_option("#provinciaExtravio", value="17")
+            try:
+                await page.wait_for_function("document.querySelectorAll('#cantonExtravio option').length > 1", timeout=8000)
+            except Exception:
+                await page.wait_for_timeout(1500)
+            await page.select_option("#cantonExtravio", label="QUITO")
+            await page.fill("#direccionCircunstancia", dir_circunstancia)
+            
+            # Fecha hábil
+            b_day = get_last_business_day()
+            formatted_date = format_date_for_input(b_day)
+            await page.evaluate(f"""
+                const d = new Date({b_day.year}, {b_day.month - 1}, {b_day.day});
+                if (window.RichFaces && RichFaces.$('fecha')) {{
+                    RichFaces.$('fecha').setValue(d);
+                }}
+                const input = document.getElementById('fechaInputDate');
+                if (input) {{
+                    input.value = '{formatted_date}';
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                }}
+            """)
+            await page.wait_for_timeout(400)
+            
+            # Agregar documento
+            await page.locator('input[value="+ Agregar un nuevo documento"]').click(force=True)
+            await page.wait_for_timeout(800)
+            
+            await page.evaluate(f"""
+                if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {{
+                    RichFaces.$('frmPopups:createPane').show();
+                }}
+                const sel = document.getElementById('frmPopups:tipoDocumentoExtraviadoNewSelect');
+                if (sel) {{
+                    sel.value = '7';
+                    sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }}
+                const num = document.getElementById('frmPopups:numeroNew');
+                if (num) {{
+                    num.value = '{cedula}';
+                    num.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    num.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                }}
+                const desc = document.getElementById('frmPopups:descripcionNew');
+                if (desc) {{
+                    desc.value = 'CÉDULA DE IDENTIDAD';
+                    desc.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    desc.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                }}
+            """)
+            await page.wait_for_timeout(600)
+            
+            await page.evaluate("""
+                const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
+                if (btn) btn.click();
+            """)
+            await page.wait_for_timeout(2000)
+            
+            await page.evaluate("""
+                if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
+                    RichFaces.$('frmPopups:createPane').hide();
+                }
+                const shade = document.getElementById('frmPopups:createPane_shade');
+                if (shade) shade.remove();
+            """)
+            await page.wait_for_timeout(400)
+            
+            # Captcha
+            await page.fill("#captchaTxt", valid_code)
+            await page.evaluate("""
+                const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
+                if (btn) btn.click();
+            """)
+            await page.wait_for_timeout(2500)
+            
+            # Confirmar "Si"
+            await page.evaluate("""
+                if (window.si) {
+                    window.si();
+                } else {
+                    const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
+                    if (btn) btn.click();
+                }
+            """)
+            
+            # Clic reactivo en 'Ver formulario'
+            await page.evaluate("""
+                new Promise((resolve) => {
+                    let attempts = 0;
+                    const interval = setInterval(() => {
+                        attempts++;
+                        const btn = document.querySelector('input[value="Ver formulario"]');
+                        if (btn) {
+                            clearInterval(interval);
+                            btn.click();
+                            resolve(true);
+                        } else if (attempts >= 40) {
+                            clearInterval(interval);
+                            resolve(false);
+                        }
+                    }, 250);
+                });
+            """)
+            
+            # Esperar PDF
+            for _ in range(18):
+                if captured_real_pdf and captured_real_pdf.startswith(b"%PDF"):
+                    break
+                await asyncio.sleep(1)
+                
+            await context.close()
+            
+            if captured_real_pdf and captured_real_pdf.startswith(b"%PDF") and len(captured_real_pdf) > 20000:
+                session_id = str(uuid.uuid4())
+                pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{session_id[:6]}.pdf")
+                with open(pdf_path, "wb") as f:
+                    f.write(captured_real_pdf)
+                    
+                sessions[session_id] = {
+                    "pdf_path": pdf_path,
+                    "cedula": cedula,
+                    "nombre": nombre,
+                    "sector_limpio": sector_limpio
+                }
+                
+                return True, {
+                    "session_id": session_id,
+                    "nombre": nombre,
+                    "cedula": cedula,
+                    "sector": sector_limpio,
+                    "pdf_bytes": captured_real_pdf
+                }, None
+            else:
+                return False, "La Judicatura no entregó el flujo binario del PDF.", None
+                
+        except Exception as e:
+            try:
+                await context.close()
+            except Exception:
+                pass
+            return False, str(e), None
+
 class AutoDenunciaRequest(BaseModel):
     cedula: str
     sector: str
@@ -158,383 +374,83 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
         
     cleanup_old_downloads()
     
-    sector_info = limpiar_y_corregir_sector(raw_sector)
-    sector_limpio = sector_info["sector_limpio"]
-    dir_domicilio = sector_info["direccion_domicilio"]
-    dir_circunstancia = sector_info["direccion_circunstancia"]
+    success, result, _ = await ejecutar_denuncia_directa(cedula, raw_sector)
     
-    session_id = str(uuid.uuid4())
-    
-    async with concurrency_semaphore:
-        context = await browser_instance.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="es-EC"
-        )
-        page = await context.new_page()
-        
-        captured_real_pdf = None
-        
-        async def route_interceptor(route, request):
-            nonlocal captured_real_pdf
-            try:
-                response = await route.fetch()
-                ct = response.headers.get("content-type", "").lower()
-                if "application/pdf" in ct or "pdf" in ct:
-                    body = await response.body()
-                    if body.startswith(b"%PDF"):
-                        captured_real_pdf = body
-                        print(f"[Captura PDF] Archivo PDF oficial recibido ({len(body)} bytes)")
-                await route.fulfill(response=response)
-            except Exception:
-                try:
-                    await route.continue_()
-                except Exception:
-                    pass
-            
-        await page.route("**/formulario.jsf*", route_interceptor)
-        
-        try:
-            print(f"Cargando portal judicial para cédula {cedula}...")
-            await page.goto("https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf", timeout=45000)
-            await page.wait_for_load_state("networkidle")
-            
-            # 1. Cédula y consulta a Registro Civil
-            await page.fill("#numeroIdentificacion", cedula)
-            await page.locator("#numeroIdentificacion").blur()
-            await page.wait_for_timeout(1800)
-            
-            nombre = await page.input_value("#nombreCompleto")
-            if not nombre:
-                nombre = "CIUDADANO REGISTRADO"
-                
-            # 2. Domicilio (Pichincha -> Quito)
-            await page.select_option("#provinciaDomicilio", value="17")
-            try:
-                await page.wait_for_function("document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=8000)
-            except Exception:
-                await page.wait_for_timeout(1500)
-            await page.select_option("#cantonDomicilio", label="QUITO")
-            await page.fill("#direccionDomicilio", dir_domicilio)
-            
-            # 3. Extravío (Pichincha -> Quito)
-            await page.select_option("#provinciaExtravio", value="17")
-            try:
-                await page.wait_for_function("document.querySelectorAll('#cantonExtravio option').length > 1", timeout=8000)
-            except Exception:
-                await page.wait_for_timeout(1500)
-            await page.select_option("#cantonExtravio", label="QUITO")
-            await page.fill("#direccionCircunstancia", dir_circunstancia)
-            
-            # 4. Fecha hábil anterior
-            b_day = get_last_business_day()
-            formatted_date = format_date_for_input(b_day)
-            await page.evaluate(f"""
-                const d = new Date({b_day.year}, {b_day.month - 1}, {b_day.day});
-                if (window.RichFaces && RichFaces.$('fecha')) {{
-                    RichFaces.$('fecha').setValue(d);
-                }}
-                const input = document.getElementById('fechaInputDate');
-                if (input) {{
-                    input.value = '{formatted_date}';
-                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    input.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                }}
-            """)
-            await page.wait_for_timeout(400)
-            
-            # 5. Agregar documento Cédula a la tabla oficial de la Judicatura
-            print("Registrando documento extraviado en la tabla oficial...")
-            await page.locator('input[value="+ Agregar un nuevo documento"]').click(force=True)
-            await page.wait_for_timeout(800)
-            
-            await page.evaluate(f"""
-                if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {{
-                    RichFaces.$('frmPopups:createPane').show();
-                }}
-                const sel = document.getElementById('frmPopups:tipoDocumentoExtraviadoNewSelect');
-                if (sel) {{
-                    sel.value = '7';
-                    sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                }}
-                const num = document.getElementById('frmPopups:numeroNew');
-                if (num) {{
-                    num.value = '{cedula}';
-                    num.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    num.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                }}
-                const desc = document.getElementById('frmPopups:descripcionNew');
-                if (desc) {{
-                    desc.value = 'CÉDULA DE IDENTIDAD';
-                    desc.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    desc.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                }}
-            """)
-            await page.wait_for_timeout(600)
-            
-            await page.evaluate("""
-                const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
-                if (btn) btn.click();
-            """)
-            await page.wait_for_timeout(2000)
-            
-            # Limpieza de sombra
-            await page.evaluate("""
-                if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
-                    RichFaces.$('frmPopups:createPane').hide();
-                }
-                const shade = document.getElementById('frmPopups:createPane_shade');
-                if (shade) shade.remove();
-            """)
-            await page.wait_for_timeout(400)
-            
-            # 6. Intentar resolver el Captcha automáticamente con reintentos limpios
-            max_attempts = 10
-            solved_successfully = False
-            last_captcha_b64 = ""
-            
-            for attempt in range(max_attempts):
-                captcha_el = await page.query_selector("#imgCaptchaId")
-                if not captcha_el:
-                    break
-                    
-                captcha_bytes = await captcha_el.screenshot()
-                last_captcha_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
-                
-                auto_code = await solve_captcha_image(captcha_bytes)
-                if not auto_code or len(auto_code) != 6:
-                    print(f"[Intento {attempt+1}] Captcha dudoso o incompleto, refrescando...")
-                    await page.evaluate("""
-                        const ref = document.querySelector('img[src*="refresh"]') || document.querySelector('a[id*="j_idt"]');
-                        if (ref) ref.click();
-                        else document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();
-                    """)
-                    await page.wait_for_timeout(1200)
-                    continue
-                    
-                print(f"[Intento {attempt+1}] Enviando código OCR: '{auto_code}'")
-                await page.fill("#captchaTxt", auto_code)
-                
-                await page.evaluate("""
-                    const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
-                    if (btn) btn.click();
-                """)
-                await page.wait_for_timeout(2500)
-                
-                confirm_modal_visible = await page.evaluate("""
-                    (function() {
-                        const modal = document.getElementById('frmPopups:confirmForm');
-                        const container = document.getElementById('frmPopups:confirmForm_container');
-                        if (modal && modal.style.visibility !== 'hidden' && modal.style.display !== 'none') return true;
-                        if (container && container.style.visibility !== 'hidden' && container.style.display !== 'none') return true;
-                        return false;
-                    })()
-                """)
-                
-                if confirm_modal_visible:
-                    print(f"[Intento {attempt+1}] ¡Captcha verificado exitosamente!")
-                    solved_successfully = True
-                    break
-                else:
-                    print(f"[Intento {attempt+1}] Captcha no aceptado, refrescando...")
-                    await page.fill("#captchaTxt", "")
-                    await page.evaluate("""
-                        const ref = document.querySelector('img[src*="refresh"]') || document.querySelector('a[id*="j_idt"]');
-                        if (ref) ref.click();
-                        else document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();
-                    """)
-                    await page.wait_for_timeout(1200)
-                    
-            # 7. Confirmar en la Judicatura y descargar el PDF REAL
-            if solved_successfully:
-                print("Confirmando denuncia de forma real en la Judicatura (clic en Si)...")
-                await page.evaluate("""
-                    if (window.si) {
-                        window.si();
-                    } else {
-                        const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
-                        if (btn) btn.click();
-                    }
-                """)
-                
-                print("Esperando reactivamente el montaje de 'Ver formulario'...")
-                # Sondeo reactivo cada 250ms que hace clic el instante exacto en que monta el botón
-                await page.evaluate("""
-                    new Promise((resolve) => {
-                        let attempts = 0;
-                        const interval = setInterval(() => {
-                            attempts++;
-                            const btn = document.querySelector('input[value="Ver formulario"]');
-                            if (btn) {
-                                clearInterval(interval);
-                                btn.click();
-                                resolve(true);
-                            } else if (attempts >= 40) {
-                                clearInterval(interval);
-                                resolve(false);
-                            }
-                        }, 250);
-                    });
-                """)
-                
-                # Esperar pasivamente la llegada del PDF real
-                for _ in range(18):
-                    if captured_real_pdf and captured_real_pdf.startswith(b"%PDF"):
-                        break
-                    await asyncio.sleep(1)
-                
-                if not captured_real_pdf or not captured_real_pdf.startswith(b"%PDF"):
-                    raise HTTPException(
-                        status_code=502,
-                        detail="El servidor de la Judicatura no entregó el PDF a tiempo. Por favor reintente en unos segundos."
-                    )
-                    
-                pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{cedula}_{uuid.uuid4().hex[:6]}.pdf")
-                with open(pdf_path, "wb") as f:
-                    f.write(captured_real_pdf)
-                    
-                print(f"[Exito] Archivo PDF autentico guardado: {pdf_path} ({len(captured_real_pdf)} bytes)")
-                
-                sessions[session_id] = {
-                    "pdf_path": pdf_path,
-                    "cedula": cedula,
-                    "nombre": nombre,
-                    "sector_limpio": sector_limpio,
-                    "dir_domicilio": dir_domicilio,
-                    "dir_circunstancia": dir_circunstancia
-                }
-                await context.close()
-                
-                return {
-                    "success": True,
-                    "downloadUrl": f"/api/download-pdf/{session_id}",
-                    "cedula": cedula,
-                    "nombre": nombre,
-                    "sectorCorregido": sector_limpio,
-                    "circunstancia": dir_circunstancia
-                }
-                
-            sessions[session_id] = {
-                "context": context,
-                "page": page,
-                "cedula": cedula,
-                "sector": sector_limpio,
-                "nombre": nombre,
-                "fecha": formatted_date,
-                "get_pdf_ref": lambda: captured_real_pdf
-            }
-            
-            return {
-                "success": False,
-                "requireManualCaptcha": True,
-                "sessionId": session_id,
-                "nombre": nombre,
-                "fecha": formatted_date,
-                "sector": sector_limpio,
-                "captchaImage": f"data:image/jpeg;base64,{last_captcha_b64}"
-            }
-            
-        except Exception as e:
-            await context.close()
-            print(f"Error procesando denuncia: {e}")
-            if isinstance(e, HTTPException):
-                raise e
-            raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/submit-captcha-manual")
-async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
-    session = sessions.get(req.session_id)
-    if not session or "page" not in session:
-        raise HTTPException(status_code=404, detail="Sesión expirada.")
-    
-    page: Page = session["page"]
-    context: BrowserContext = session["context"]
-    captcha_text = req.captcha_text.strip()
-    
-    try:
-        await page.fill("#captchaTxt", captcha_text)
-        await page.evaluate("""
-            const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
-            if (btn) btn.click();
-        """)
-        await page.wait_for_timeout(2500)
-        
-        confirm_modal_visible = await page.evaluate("""
-            (function() {
-                const modal = document.getElementById('frmPopups:confirmForm');
-                const container = document.getElementById('frmPopups:confirmForm_container');
-                if (modal && modal.style.visibility !== 'hidden' && modal.style.display !== 'none') return true;
-                if (container && container.style.visibility !== 'hidden' && container.style.display !== 'none') return true;
-                return false;
-            })()
-        """)
-        
-        if not confirm_modal_visible:
-            captcha_el = await page.query_selector("#imgCaptchaId")
-            new_b64 = ""
-            if captcha_el:
-                c_bytes = await captcha_el.screenshot()
-                new_b64 = f"data:image/jpeg;base64,{base64.b64encode(c_bytes).decode('utf-8')}"
-            return {
-                "success": False,
-                "error": "Código incorrecto. Intente nuevamente con el código de la imagen.",
-                "newCaptcha": new_b64
-            }
-            
-        await page.evaluate("""
-            if (window.si) {
-                window.si();
-            } else {
-                const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
-                if (btn) btn.click();
-            }
-        """)
-        
-        # Sondeo reactivo también en el flujo manual
-        await page.evaluate("""
-            new Promise((resolve) => {
-                let attempts = 0;
-                const interval = setInterval(() => {
-                    attempts++;
-                    const btn = document.querySelector('input[value="Ver formulario"]');
-                    if (btn) {
-                        clearInterval(interval);
-                        btn.click();
-                        resolve(true);
-                    } else if (attempts >= 40) {
-                        clearInterval(interval);
-                        resolve(false);
-                    }
-                }, 250);
-            });
-        """)
-        
-        captured_pdf = None
-        for _ in range(18):
-            captured_pdf = session["get_pdf_ref"]()
-            if captured_pdf and captured_pdf.startswith(b"%PDF"):
-                break
-            await asyncio.sleep(1)
-            
-        if not captured_pdf or not captured_pdf.startswith(b"%PDF"):
-            raise HTTPException(status_code=502, detail="El servidor de la Judicatura tardó en entregar el PDF.")
-            
-        pdf_path = os.path.join(DOWNLOADS_DIR, f"denuncia_{session['cedula']}_{uuid.uuid4().hex[:6]}.pdf")
-        with open(pdf_path, "wb") as f:
-            f.write(captured_pdf)
-            
-        session["pdf_path"] = pdf_path
-        await context.close()
-        
+    if success:
         return {
             "success": True,
-            "downloadUrl": f"/api/download-pdf/{req.session_id}",
-            "cedula": session["cedula"],
-            "nombre": session["nombre"]
+            "downloadUrl": f"/api/download-pdf/{result['session_id']}",
+            "cedula": result["cedula"],
+            "nombre": result["nombre"],
+            "sectorCorregido": result["sector"]
         }
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+    else:
+        raise HTTPException(status_code=502, detail=result)
+
+@app.api_route("/api/whatsapp-webhook", methods=["GET", "POST"])
+async def whatsapp_webhook(request: Request, From: Optional[str] = Form(None), Body: Optional[str] = Form(None)):
+    """Webhook universal para WhatsApp (Twilio / Meta / Green-API)"""
+    cleanup_old_downloads()
+    
+    text_content = ""
+    if Body:
+        text_content = Body.strip()
+    else:
+        try:
+            json_data = await request.json()
+            # Green-API / Meta format
+            text_content = (
+                json_data.get("messageData", {}).get("textMessageData", {}).get("textMessage", "") or
+                json_data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages", [{}])[0].get("text", {}).get("body", "") or
+                json_data.get("body", "")
+            ).strip()
+        except Exception:
+            pass
+            
+    if not text_content:
+        twiml = "<Response><Message><Body>👋 ¡Hola! Por favor envíame el número de cédula y el sector para generar la denuncia oficial.\nEjemplo: 1708927502 Sector El Recreo</Body></Message></Response>"
+        return Response(content=twiml, media_type="application/xml")
+        
+    cedula_match = re.search(r'\b\d{10}\b', text_content)
+    if not cedula_match:
+        twiml = "<Response><Message><Body>⚠️ Por favor incluye un número de cédula válido de 10 dígitos.\nEjemplo: 1708927502 Sector El Recreo</Body></Message></Response>"
+        return Response(content=twiml, media_type="application/xml")
+        
+    cedula = cedula_match.group(0)
+    sector_raw = text_content.replace(cedula, "").strip()
+    sector_raw = re.sub(r'^(en el|en|sector|el|la)\s+', '', sector_raw, flags=re.IGNORECASE).strip()
+    if not sector_raw or len(sector_raw) < 2:
+        sector_raw = "Sector Centro"
+        
+    success, result, _ = await ejecutar_denuncia_directa(cedula, sector_raw)
+    
+    if success:
+        session_id = result["session_id"]
+        nombre = result["nombre"]
+        sector_fmt = result["sector"]
+        pdf_download_url = f"https://denuncias-mama.onrender.com/api/download-pdf/{session_id}"
+        
+        twiml = f"""<Response>
+    <Message>
+        <Body>✅ *¡DENUNCIA GENERADA CON ÉXITO!*
+👤 *Nombre:* {nombre}
+🆔 *Cédula:* {cedula}
+📍 *Lugar:* {sector_fmt}
+
+📄 *Descarga tu PDF Oficial:*
+{pdf_download_url}</Body>
+        <Media>{pdf_download_url}</Media>
+    </Message>
+</Response>"""
+        return Response(content=twiml, media_type="application/xml")
+    else:
+        twiml = f"""<Response>
+    <Message>
+        <Body>❌ *No se pudo emitir la denuncia:* {result}
+Por favor intenta de nuevo en unos momentos.</Body>
+    </Message>
+</Response>"""
+        return Response(content=twiml, media_type="application/xml")
 
 @app.get("/api/download-pdf/{session_id}")
 async def download_pdf(session_id: str):
