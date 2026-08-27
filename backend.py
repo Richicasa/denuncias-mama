@@ -15,14 +15,18 @@ from PIL import Image
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from text_cleaner import limpiar_y_corregir_sector
 
-from telegram import Update, InputFile
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters
-)
+try:
+    from telegram import Update, InputFile
+    from telegram.ext import (
+        ApplicationBuilder,
+        CommandHandler,
+        ContextTypes,
+        MessageHandler,
+        filters
+    )
+    has_telegram = True
+except ImportError:
+    has_telegram = False
 
 try:
     import winocr
@@ -442,7 +446,7 @@ async def startup_event():
     )
     print("🚀 Motor de navegación para denuncias judiciales iniciado.", flush=True)
     
-    if TELEGRAM_TOKEN:
+    if has_telegram and TELEGRAM_TOKEN:
         try:
             telegram_application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
             telegram_application.add_handler(CommandHandler("start", tg_start_command))
