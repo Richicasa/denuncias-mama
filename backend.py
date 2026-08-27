@@ -16,6 +16,11 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from text_cleaner import limpiar_y_corregir_sector
 
 try:
+    import winocr
+except ImportError:
+    winocr = None
+
+try:
     import pytesseract
 except ImportError:
     pytesseract = None
@@ -34,7 +39,7 @@ sessions: Dict[str, dict] = {}
 DOWNLOADS_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-CONCURRENCY_LIMIT = 4
+CONCURRENCY_LIMIT = 3
 concurrency_semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
 playwright_instance = None
@@ -75,34 +80,35 @@ def format_date_for_input(d):
     months_short = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
     return f"{months_short[d.month - 1]} {d.day}, {d.year}"
 
-def solve_captcha_image(image_bytes: bytes) -> str:
-    if not pytesseract:
-        return ""
-    try:
-        img_orig = Image.open(io.BytesIO(image_bytes)).convert("L")
-        w, h = img_orig.size
-        scaled = img_orig.resize((w * 4, h * 4), Image.Resampling.LANCZOS)
-        
-        umbrales = [175, 160, 190, 150, 200]
-        for th in umbrales:
-            bin_img = scaled.point(lambda p: 0 if p > th else 255)
-            text = pytesseract.image_to_string(
-                bin_img,
-                config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-            ).strip()
-            cleaned = re.sub(r'[^A-Za-z0-9]', '', text)
-            if len(cleaned) >= 5 and len(cleaned) <= 6:
+async def solve_captcha_image(image_bytes: bytes) -> str:
+    if winocr:
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            scaled = img.resize((img.width * 3, img.height * 3), Image.Resampling.LANCZOS)
+            res = await winocr.recognize_pil(scaled, lang="es")
+            cleaned = re.sub(r'[^A-Za-z0-9]', '', res.text.strip())
+            if len(cleaned) == 6:
                 return cleaned
-                
-        bin_img = scaled.point(lambda p: 0 if p > 175 else 255)
-        text = pytesseract.image_to_string(
-            bin_img,
-            config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-        ).strip()
-        return re.sub(r'[^A-Za-z0-9]', '', text)
-    except Exception as e:
-        print(f"[OCR Error] {e}")
-        return ""
+        except Exception:
+            pass
+
+    if pytesseract:
+        try:
+            img_orig = Image.open(io.BytesIO(image_bytes)).convert("L")
+            scaled = img_orig.resize((img_orig.width * 4, img_orig.height * 4), Image.Resampling.LANCZOS)
+            for th in [175, 160, 190, 150, 200]:
+                bin_img = scaled.point(lambda p: 0 if p > th else 255)
+                text = pytesseract.image_to_string(
+                    bin_img,
+                    config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+                ).strip()
+                cleaned = re.sub(r'[^A-Za-z0-9]', '', text)
+                if len(cleaned) == 6:
+                    return cleaned
+        except Exception:
+            pass
+
+    return ""
 
 def cleanup_old_downloads():
     try:
@@ -281,8 +287,8 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
             """)
             await page.wait_for_timeout(400)
             
-            # 6. Intentar resolver el Captcha automáticamente (hasta 12 intentos)
-            max_attempts = 12
+            # 6. Intentar resolver el Captcha automáticamente con reintentos limpios
+            max_attempts = 10
             solved_successfully = False
             last_captcha_b64 = ""
             
@@ -294,11 +300,15 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                 captcha_bytes = await captcha_el.screenshot()
                 last_captcha_b64 = base64.b64encode(captcha_bytes).decode("utf-8")
                 
-                auto_code = solve_captcha_image(captcha_bytes)
-                if not auto_code or len(auto_code) < 5:
-                    print(f"[Intento {attempt+1}] Captcha dudoso, refrescando...")
-                    await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
-                    await page.wait_for_timeout(1000)
+                auto_code = await solve_captcha_image(captcha_bytes)
+                if not auto_code or len(auto_code) != 6:
+                    print(f"[Intento {attempt+1}] Captcha dudoso o incompleto, refrescando...")
+                    await page.evaluate("""
+                        const ref = document.querySelector('img[src*="refresh"]') || document.querySelector('a[id*="j_idt"]');
+                        if (ref) ref.click();
+                        else document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();
+                    """)
+                    await page.wait_for_timeout(1200)
                     continue
                     
                 print(f"[Intento {attempt+1}] Enviando código OCR: '{auto_code}'")
@@ -325,9 +335,14 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                     solved_successfully = True
                     break
                 else:
-                    print(f"[Intento {attempt+1}] Captcha no válido para la Judicatura, refrescando...")
-                    await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
-                    await page.wait_for_timeout(1000)
+                    print(f"[Intento {attempt+1}] Captcha no aceptado, refrescando...")
+                    await page.fill("#captchaTxt", "")
+                    await page.evaluate("""
+                        const ref = document.querySelector('img[src*="refresh"]') || document.querySelector('a[id*="j_idt"]');
+                        if (ref) ref.click();
+                        else document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();
+                    """)
+                    await page.wait_for_timeout(1200)
                     
             # 7. Confirmar en la Judicatura y descargar el PDF REAL
             if solved_successfully:
@@ -340,12 +355,25 @@ async def generar_denuncia_auto(req: AutoDenunciaRequest):
                         if (btn) btn.click();
                     }
                 """)
-                await page.wait_for_timeout(3500)
                 
-                print("Haciendo clic en el botón oficial 'Ver formulario'...")
+                print("Esperando reactivamente el montaje de 'Ver formulario'...")
+                # Sondeo reactivo cada 250ms que hace clic el instante exacto en que monta el botón
                 await page.evaluate("""
-                    const btn = document.querySelector('input[value="Ver formulario"]');
-                    if (btn) btn.click();
+                    new Promise((resolve) => {
+                        let attempts = 0;
+                        const interval = setInterval(() => {
+                            attempts++;
+                            const btn = document.querySelector('input[value="Ver formulario"]');
+                            if (btn) {
+                                clearInterval(interval);
+                                btn.click();
+                                resolve(true);
+                            } else if (attempts >= 40) {
+                                clearInterval(interval);
+                                resolve(false);
+                            }
+                        }, 250);
+                    });
                 """)
                 
                 # Esperar pasivamente la llegada del PDF real
@@ -460,11 +488,24 @@ async def submit_captcha_manual(req: SubmitManualCaptchaRequest):
                 if (btn) btn.click();
             }
         """)
-        await page.wait_for_timeout(3500)
         
+        # Sondeo reactivo también en el flujo manual
         await page.evaluate("""
-            const btn = document.querySelector('input[value="Ver formulario"]');
-            if (btn) btn.click();
+            new Promise((resolve) => {
+                let attempts = 0;
+                const interval = setInterval(() => {
+                    attempts++;
+                    const btn = document.querySelector('input[value="Ver formulario"]');
+                    if (btn) {
+                        clearInterval(interval);
+                        btn.click();
+                        resolve(true);
+                    } else if (attempts >= 40) {
+                        clearInterval(interval);
+                        resolve(false);
+                    }
+                }, 250);
+            });
         """)
         
         captured_pdf = None
