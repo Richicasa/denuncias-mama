@@ -1,0 +1,29 @@
+====================================================================
+      GUÍA PARA EJECUTAR EN TU COMPUTADORA LINUX MINT
+====================================================================
+
+Esta carpeta contiene la versión adaptada para Linux Mint con la última
+configuración definitiva probada (multibotón de PDF, interceptor global
+y reintentos automáticos silenciosos).
+
+--------------------------------------------------------------------
+PASOS EN LINUX MINT:
+--------------------------------------------------------------------
+1. Pasa esta carpeta ('configuracion para la otra computadora') a tu Linux Mint.
+2. Abre la Terminal dentro de esa carpeta.
+3. Escribe este comando para corregir formatos y dar permisos:
+   sed -i 's/\r$//' *.sh && chmod +x *.sh
+
+4. Ejecuta el instalador (solo 1 vez):
+   bash instalar_todo.sh
+   (Te pedirá tu contraseña para instalar Tesseract OCR y Chromium).
+
+5. Inicia el bot:
+   bash iniciar_bot.sh
+
+--------------------------------------------------------------------
+¿QUIERES QUE ARRANQUE SOLO CADA VEZ QUE ENCIENDAS LA PC? (OPCIONAL)
+--------------------------------------------------------------------
+bash configurar_inicio_automatico_24_7.sh
+
+====================================================================

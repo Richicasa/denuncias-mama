@@ -1,69 +1,100 @@
 import re
-import unicodedata
+import difflib
 
-def normalizar_texto(texto: str) -> str:
-    if not texto:
-        return ""
-    texto_sin_acentos = ''.join(
-        c for c in unicodedata.normalize('NFD', texto)
-        if unicodedata.category(c) != 'Mn'
-    )
-    return texto_sin_acentos.upper().strip()
+# Diccionario ampliado de sectores y barrios de Quito y valles con ortografía oficial
+SECTORES_QUITO = [
+    "El Recreo", "La Magdalena", "Carapungo", "Centro Histórico", "Quitumbe",
+    "Solanda", "Chillogallo", "Calderón", "La Mariscal", "La Carolina",
+    "Cumbayá", "Tumbaco", "Guamaní", "Chimbacalle", "La Villaflora",
+    "San Roque", "El Tejar", "El Condado", "El Inca", "El Bosque", "El Pintado",
+    "La Floresta", "La Vicentina", "La Gasca", "La Tola", "La Armenia",
+    "Cotocollao", "Ponceano", "Carcelén", "Conocoto", "San Antonio de Pichincha",
+    "Pomasqui", "Nayón", "Zámbiza", "Llano Chico", "Llano Grande", "Guayllabamba",
+    "Puengasí", "La Argelia", "La Ferroviaria", "La Ecuatoriana", "Turubamba",
+    "San Bartolo", "Mena 2", "El Camal", "La Roldós", "Pisulí", "San Juan",
+    "Itchimbía", "González Suárez", "Bellavista", "Monteserrín", "Granda Centeno",
+    "Las Casas", "Miraflores", "Santa Prisca", "Guápulo", "San Carlos",
+    "El Labrador", "La Ofelia", "Monjas", "San José de Morán", "San Isidro de El Inca",
+    "Los Chillos", "Tumbaco", "Pifo", "Yaruquí", "Checa", "El Quinche", "Tababela",
+    "Sangolquí", "Amaguaña", "Pintag", "Alangasí"
+]
 
-def limpiar_y_corregir_sector(raw_input: str) -> dict:
-    if not raw_input or not raw_input.strip():
+def limpiar_y_corregir_sector(texto_original: str) -> dict:
+    if not texto_original:
         return {
-            "sector_limpio": "CENTRO",
-            "direccion_domicilio": "SECTOR CENTRO",
-            "direccion_circunstancia": "EXTRAVIO EN SECTOR CENTRO"
+            "sector_limpio": "",
+            "direccion_domicilio": "",
+            "direccion_circunstancia": ""
         }
         
-    limpio = normalizar_texto(raw_input)
-    limpio = re.sub(r'[\r\n\t]+', ' ', limpio)
-    limpio = re.sub(r'[^\w\s\-\.,#]', '', limpio)
-    limpio = re.sub(r'\s+', ' ', limpio).strip()
+    texto = texto_original.strip()
     
-    correcciones = {
-        r'\bRECREO\b': 'EL RECREO',
-        r'\bVILLAFLORA\b': 'LA VILLAFLORA',
-        r'\bFLORESTA\b': 'LA FLORESTA',
-        r'\bMARISCAL\b': 'LA MARISCAL',
-        r'\bMAGDALENA\b': 'LA MAGDALENA',
-        r'\bCAROLINA\b': 'LA CAROLINA',
-        r'\bQUITUMBE\b': 'SECTOR QUITUMBE',
-        r'\bCONDADO\b': 'EL CONDADO',
-        r'\bINCA\b': 'EL INCA',
-        r'\bCENTRO\b': 'CENTRO HISTORICO',
-        r'\bCALDERON\b': 'CALDERON',
-        r'\bCHILLOGALLO\b': 'CHILLOGALLO',
-        r'\bSOLANDA\b': 'SOLANDA',
-        r'\bCOOTOCOLLAO\b': 'COTOCOLLAO',
-        r'\bCOTOCOLAO\b': 'COTOCOLLAO',
-        r'\bCUMBAYA\b': 'CUMBAYA',
-        r'\bTUMBACO\b': 'TUMBACO',
-        r'\bGUAMANI\b': 'GUAMANI'
-    }
+    # 1. Eliminar prefijos comunes redundantes
+    prefijos = [
+        r"^documento\s+extraviado\s+en\s+(el\s+sector\s+(de|del)?\s*)?",
+        r"^extraviado\s+en\s+(el\s+sector\s+(de|del)?\s*)?",
+        r"^en\s+el\s+sector\s+(de|del)?\s*",
+        r"^sector\s+(de|del)?\s*",
+        r"^en\s+(el|la|los|las)?\s*",
+        r"^por\s+(el|la|los|las)?\s*",
+        r"^cerca\s+(de|al|a\s+la)?\s*",
+        r"^barrio\s+(de|del)?\s*",
+    ]
     
-    for patron, reemplazo in correcciones.items():
-        if re.search(patron, limpio):
-            limpio = re.sub(patron, reemplazo, limpio)
-            break
-            
-    limpio = re.sub(r'\s+', ' ', limpio).strip()
-    
-    if len(limpio) < 3:
-        limpio = "SECTOR CENTRO"
+    texto_sin_prefijos = texto
+    for p in prefijos:
+        texto_sin_prefijos = re.sub(p, "", texto_sin_prefijos, flags=re.IGNORECASE).strip()
         
-    direccion_domicilio = f"SECTOR {limpio}".replace("SECTOR SECTOR", "SECTOR").strip()
-    direccion_circunstancia = f"EXTRAVIO EN SECTOR {limpio}".replace("SECTOR SECTOR", "SECTOR").strip()
+    if not texto_sin_prefijos:
+        texto_sin_prefijos = texto
+        
+    # Capitalizar apropiadamente
+    palabras = [w.capitalize() for w in texto_sin_prefijos.split()]
+    articulos_menores = {"de", "del", "la", "el", "los", "las", "y", "en"}
+    palabras_formateadas = []
+    for i, p in enumerate(palabras):
+        if i > 0 and p.lower() in articulos_menores:
+            palabras_formateadas.append(p.lower())
+        else:
+            palabras_formateadas.append(p)
+    texto_procesado = " ".join(palabras_formateadas)
     
-    if len(direccion_domicilio) > 100:
-        direccion_domicilio = direccion_domicilio[:100]
-    if len(direccion_circunstancia) > 100:
-        direccion_circunstancia = direccion_circunstancia[:100]
+    # 2. Búsqueda difusa (Fuzzy matching)
+    mejor_coincidencia = None
+    mejor_ratio = 0.0
+    
+    # Comprobación directa contra sectores conocidos (incluyendo sin artículo)
+    for sector in SECTORES_QUITO:
+        # Comparar con el nombre completo
+        r1 = difflib.SequenceMatcher(None, texto_procesado.lower(), sector.lower()).ratio()
+        # Comparar también quitando el artículo inicial ("El Recreo" -> "Recreo")
+        sector_sin_art = re.sub(r'^(el|la|los|las)\s+', '', sector, flags=re.IGNORECASE)
+        r2 = difflib.SequenceMatcher(None, texto_procesado.lower(), sector_sin_art.lower()).ratio()
+        
+        max_r = max(r1, r2)
+        if max_r > 0.80 and max_r > mejor_ratio:
+            mejor_ratio = max_r
+            mejor_coincidencia = sector
+            
+    sector_final = mejor_coincidencia if mejor_coincidencia else texto_procesado
+    
+    # 3. Construcción gramatical correcta
+    if sector_final.lower().startswith("el "):
+        nombre_sin_articulo = sector_final[3:]
+        domicilio = f"Sector {sector_final}"
+        circunstancia = f"Documento extraviado en el sector del {nombre_sin_articulo}"
+    elif sector_final.lower().startswith("la ") or sector_final.lower().startswith("las ") or sector_final.lower().startswith("los "):
+        domicilio = f"Sector {sector_final}"
+        circunstancia = f"Documento extraviado en el sector de {sector_final}"
+    elif "centro" in sector_final.lower():
+        domicilio = f"Sector {sector_final}"
+        circunstancia = f"Documento extraviado en el sector del {sector_final}"
+    else:
+        domicilio = f"Sector {sector_final}"
+        circunstancia = f"Documento extraviado en el sector de {sector_final}"
         
     return {
-        "sector_limpio": limpio,
-        "direccion_domicilio": direccion_domicilio,
-        "direccion_circunstancia": direccion_circunstancia
+        "sector_limpio": sector_final,
+        "direccion_domicilio": domicilio,
+        "direccion_circunstancia": circunstancia
     }

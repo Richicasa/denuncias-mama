@@ -1,0 +1,11 @@
+[0826/195919.253:INFO:CONSOLE:305] "Event handler of 'x-storagemutated-1' event must be added on the initial evaluation of worker script.", source: https://static.whatsapp.net/rsrc.php/v4/yA/r/HDqHAB5ezny.js (305)
+[0826/195919.967:INFO:CONSOLE:84] "ErrorUtils caught an error:
+
+[storage] storage bucket persistence denied (aquire-persistent-storage-denied)
+
+Subsequent non-fatal errors won't be logged; see https://fburl.com/debugjs. [object Object]", source: https://static.whatsapp.net/rsrc.php/v4/yC/r/i0aGzFhIApp.js (84)
+[0826/195920.241:INFO:CONSOLE:0] "[.WebGL-0x4454001d5600]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels", source: https://web.whatsapp.com/ (0)
+[0826/195920.243:INFO:CONSOLE:0] "[.WebGL-0x4454001d1a00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels", source: https://web.whatsapp.com/ (0)
+[0826/195920.244:INFO:CONSOLE:0] "[.WebGL-0x445400c04c00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels", source: https://web.whatsapp.com/ (0)
+[0826/195920.296:INFO:CONSOLE:0] "[.WebGL-0x445400c05200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)", source: https://web.whatsapp.com/ (0)
+[0826/195921.341:INFO:CONSOLE:305] "Event handler of 'x-storagemutated-1' event must be added on the initial evaluation of worker script.", source: https://static.whatsapp.net/rsrc.php/v4/yA/r/HDqHAB5ezny.js (305)

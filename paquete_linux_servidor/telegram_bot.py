@@ -83,7 +83,7 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str):
             try:
                 resp = await route.fetch()
                 ct = resp.headers.get("content-type", "").lower()
-                if "application/pdf" in ct or "pdf" in ct:
+                if "application/pdf" in ct or "pdf" in ct or "impresionreporte" in request.url.lower():
                     body = await resp.body()
                     if body.startswith(b"%PDF"):
                         captured_pdf = body
@@ -94,7 +94,15 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str):
                 except Exception:
                     pass
                     
-        await page.route("**/formulario.jsf*", route_interceptor)
+        await page.route("**/*", route_interceptor)
+        
+        async def handle_popup(popup):
+            nonlocal captured_pdf
+            try:
+                await popup.wait_for_load_state("networkidle")
+            except Exception:
+                pass
+        context.on("page", handle_popup)
         
         try:
             await page.goto("https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf", timeout=45000)
@@ -116,7 +124,7 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str):
                 
             if not valid_captcha_code:
                 await browser.close()
-                return False, "No se pudo leer un captcha nítido de la Judicatura. Por favor intenta de nuevo.", None
+                return False, "Captcha no legible en este intento.", None
                 
             # 1. Cédula
             await page.fill("#numeroIdentificacion", cedula)
@@ -217,18 +225,20 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str):
                 }
             """)
             
-            # 8. Clic reactivo en 'Ver formulario'
-            await page.evaluate("""
+            # 8. Clic reactivo en todos los botones de 'Ver formulario'
+            ver_clicked = await page.evaluate("""
                 new Promise((resolve) => {
                     let attempts = 0;
                     const interval = setInterval(() => {
                         attempts++;
-                        const btn = document.querySelector('input[value="Ver formulario"]');
-                        if (btn) {
+                        const buttons = Array.from(document.querySelectorAll('input[value="Ver formulario"]'));
+                        if (buttons.length > 0) {
+                            buttons.forEach(btn => {
+                                try { btn.click(); } catch(e) {}
+                            });
                             clearInterval(interval);
-                            btn.click();
                             resolve(true);
-                        } else if (attempts >= 40) {
+                        } else if (attempts >= 30) {
                             clearInterval(interval);
                             resolve(false);
                         }
@@ -237,7 +247,7 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str):
             """)
             
             # 9. Esperar PDF oficial
-            for _ in range(18):
+            for _ in range(12):
                 if captured_pdf and captured_pdf.startswith(b"%PDF"):
                     break
                 await asyncio.sleep(1)
@@ -252,14 +262,14 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str):
                     "pdf_bytes": captured_pdf
                 }, None
             else:
-                return False, "El servidor de la Judicatura tardó en emitir el PDF.", None
+                return False, "Reintentando emisión...", None
                 
         except Exception as e:
             try:
                 await browser.close()
             except Exception:
                 pass
-            return False, f"Error al procesar: {str(e)}", None
+            return False, f"Error: {str(e)}", None
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
@@ -313,46 +323,58 @@ async def procesar_y_responder(update: Update, cedula: str, sector: str):
         f"⏳ **Generando denuncia oficial ante el Consejo de la Judicatura...**\n"
         f"🆔 Cédula: `{cedula}`\n"
         f"📍 Sector: `{sector}`\n\n"
-        f"*Esto toma aproximadamente 13 segundos...*",
+        f"*Procesando, por favor espera...*",
         parse_mode="Markdown"
     )
-    
+
+    intento = 1
     t0 = time.time()
-    success, result, _ = await procesar_denuncia_judicial(cedula, sector)
-    elapsed = time.time() - t0
-    
-    if success:
-        pdf_bytes = result["pdf_bytes"]
-        nombre = result["nombre"]
-        sector_fmt = result["sector"]
-        
-        caption = (
-            f"✅ **¡DENUNCIA GENERADA CON ÉXITO!** ({elapsed:.1f}s)\n\n"
-            f"👤 **Nombre:** {nombre}\n"
-            f"🆔 **Cédula:** `{cedula}`\n"
-            f"📍 **Lugar:** {sector_fmt}\n\n"
-            f"📄 *Documento oficial emitido por el Consejo de la Judicatura (válido para trámites legales y Registro Civil).* "
-        )
-        
-        pdf_file = io.BytesIO(pdf_bytes)
-        pdf_file.name = f"Denuncia_{cedula}.pdf"
-        
-        await update.message.reply_document(
-            document=InputFile(pdf_file, filename=f"Denuncia_{cedula}.pdf"),
-            caption=caption,
-            parse_mode="Markdown"
-        )
+
+    while True:
+        success, result, _ = await procesar_denuncia_judicial(cedula, sector)
+
+        if success:
+            elapsed = time.time() - t0
+            pdf_bytes = result["pdf_bytes"]
+            nombre = result["nombre"]
+            sector_fmt = result["sector"]
+
+            caption = (
+                f"✅ **¡DENUNCIA GENERADA CON ÉXITO!** ({elapsed:.1f}s)\n\n"
+                f"👤 **Nombre:** {nombre}\n"
+                f"🆔 **Cédula:** `{cedula}`\n"
+                f"📍 **Lugar:** {sector_fmt}\n\n"
+                f"📄 *Documento oficial emitido por el Consejo de la Judicatura (válido para trámites legales y Registro Civil).*"
+            )
+
+            pdf_file = io.BytesIO(pdf_bytes)
+            pdf_file.name = f"Denuncia_{cedula}.pdf"
+
+            await update.message.reply_document(
+                document=InputFile(pdf_file, filename=f"Denuncia_{cedula}.pdf"),
+                caption=caption,
+                parse_mode="Markdown"
+            )
+            try:
+                await msg_espera.delete()
+            except Exception:
+                pass
+            return
+
+        # Reintento silencioso actualizando el mensaje
+        intento += 1
         try:
-            await msg_espera.delete()
+            await msg_espera.edit_text(
+                f"⏳ **Generando denuncia oficial ante el Consejo de la Judicatura...**\n"
+                f"🆔 Cédula: `{cedula}`\n"
+                f"📍 Sector: `{sector}`\n\n"
+                f"🔄 *Reintentando automáticamente (intento {intento})...*",
+                parse_mode="Markdown"
+            )
         except Exception:
             pass
-    else:
-        error_msg = result if isinstance(result, str) else "Error al generar la denuncia."
-        await update.message.reply_text(
-            f"❌ **No se pudo completar la emisión:**\n{error_msg}\n\n"
-            f"Por favor reenvía los datos para reintentar.",
-            parse_mode="Markdown"
-        )
+
+        await asyncio.sleep(2)
 
 def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()

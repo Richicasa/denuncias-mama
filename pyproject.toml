@@ -8,6 +8,7 @@ dependencies = [
     "pillow>=12.3.0",
     "playwright>=1.62.0",
     "python-multipart>=0.0.32",
+    "python-telegram-bot>=22.8",
     "qrcode>=8.2",
     "requests>=2.34.2",
     "uvicorn[standard]>=0.52.4",
