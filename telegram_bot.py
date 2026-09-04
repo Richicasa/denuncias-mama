@@ -16,6 +16,8 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 from text_cleaner import limpiar_y_corregir_sector
+from ant_orden_pago import detectar_mensaje_ant, parsear_mensaje_ant, procesar_orden_pago_ant
+from ant_handlers import handle_message_ant
 
 try:
     import winocr
@@ -439,6 +441,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
+
+    # Revisa si es flujo ANT
+    if detectar_mensaje_ant(text) or user_states.get(user_id, {}).get("flujo") == "ant":
+        return await handle_message_ant(update, context, user_states)
 
     # Parsear el mensaje inteligentemente
     parsed = parsear_mensaje(text)
