@@ -18,6 +18,8 @@ from playwright.async_api import async_playwright
 from text_cleaner import limpiar_y_corregir_sector
 from ant_orden_pago import detectar_mensaje_ant, parsear_mensaje_ant, procesar_orden_pago_ant
 from ant_handlers import handle_message_ant
+from record_policial import detectar_mensaje_record, parsear_mensaje_record
+from record_handlers import handle_message_record
 
 try:
     import winocr
@@ -445,6 +447,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Revisa si es flujo ANT
     if detectar_mensaje_ant(text) or user_states.get(user_id, {}).get("flujo") == "ant":
         return await handle_message_ant(update, context, user_states)
+        
+    # Revisa si es flujo Record Policial
+    if detectar_mensaje_record(text) or user_states.get(user_id, {}).get("flujo") == "record":
+        cedula = parsear_mensaje_record(text) or user_states.get(user_id, {}).get("cedula")
+        
+        if not cedula:
+            user_states[user_id] = {"flujo": "record"}
+            await update.message.reply_text("Para generar el Récord Policial, por favor indicame el número de **cédula**.", parse_mode="Markdown")
+            return
+            
+        if user_id in user_states:
+            del user_states[user_id]
+            
+        return await handle_message_record(update, context, cedula)
 
     # Parsear el mensaje inteligentemente
     parsed = parsear_mensaje(text)
