@@ -3,6 +3,7 @@ import datetime
 import io
 import os
 import re
+import subprocess
 import sys
 import time
 from PIL import Image
@@ -453,9 +454,9 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "Already up to date" in salida or "Ya está actualizado" in salida:
             await msg.edit_text("✅ El bot ya está corriendo la última versión disponible.")
         else:
-            await msg.edit_text(f"🚀 ¡Actualizado con éxito!\n\n`{salida[:200]}`\n\nReiniciando bot...")
+            await msg.edit_text(f"🚀 ¡Actualizado con éxito!\n\n`{salida[:200]}`\n\nReiniciando bot automáticamente...")
             await asyncio.sleep(1)
-            sys.exit(0)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
         await msg.edit_text(f"❌ Error al actualizar: {e}")
 
