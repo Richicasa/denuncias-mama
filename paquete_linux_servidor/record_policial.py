@@ -1,4 +1,5 @@
 import asyncio
+import io
 import re
 import time
 from playwright.async_api import async_playwright
@@ -14,7 +15,6 @@ def detectar_mensaje_record(texto: str) -> bool:
     return any(kw in t for kw in KEYWORDS_RECORD)
 
 def parsear_mensaje_record(texto: str) -> str | None:
-    # Solo buscamos la cedula (10 digitos)
     m = re.search(r"\b(\d{10})\b", texto)
     if m:
         return m.group(1)
@@ -22,142 +22,211 @@ def parsear_mensaje_record(texto: str) -> str | None:
 
 async def procesar_record_policial(cedula: str) -> tuple:
     """
-    Retorna (success: bool, pdf_bytes_or_error: bytes|str, nombre: str|None)
+    Genera el Certificado de Antecedentes Penales (Record Policial).
+    Retorna: (success: bool, pdf_bytes_or_error: bytes|str, nombre: str|None)
     """
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
                 '--disable-web-security'
             ]
         )
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
             locale="es-EC",
             accept_downloads=True
         )
-        
-        # Ocultar que es un bot
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
+
+        # Evasion basica de deteccion
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.chrome = { runtime: {} };
+        """)
+
         page = await context.new_page()
-        
-        pdf_final = None
+
+        # Variable para capturar el PDF por cualquiera de los 3 metodos posibles
+        captured_pdf = None
+
+        # 1. Metodo de captura: Intercepcion de respuestas de red (HTTP route)
+        async def route_interceptor(route, request):
+            nonlocal captured_pdf
+            try:
+                resp = await route.fetch()
+                ct = resp.headers.get("content-type", "").lower()
+                body = await resp.body()
+                if ("application/pdf" in ct or "pdf" in ct or body.startswith(b"%PDF")) and len(body) > 5000:
+                    captured_pdf = body
+                await route.fulfill(response=resp)
+            except Exception:
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+
+        await page.route("**/*", route_interceptor)
+
+        # 2. Metodo de captura: Evento de descarga del navegador (download)
         async def on_download(download):
-            nonlocal pdf_final
+            nonlocal captured_pdf
             try:
                 path = await download.path()
                 if path:
                     with open(path, "rb") as f:
-                        pdf_final = f.read()
+                        data = f.read()
+                        if len(data) > 5000:
+                            captured_pdf = data
             except Exception:
                 pass
+
         page.on("download", on_download)
-        
-        try:
-            await page.goto(URL_RECORD, timeout=45000)
-            await page.wait_for_load_state("networkidle")
-            
-            # Verificar si caimos en Incapsula (WAF)
-            frames = await page.locator("iframe").all()
-            for f in frames:
-                src = await f.get_attribute("src")
-                if src and "Incapsula" in src:
-                    await browser.close()
-                    return False, "⚠️ El servidor del Ministerio del Interior rechazó la conexión (Incapsula Firewall). Intenta nuevamente más tarde.", None
-            
-            # A veces hay un modal de terminos inicial, buscamos boton Aceptar si existe
+
+        # 3. Metodo de captura: Manejo de ventanas emergentes (popups / target=_blank)
+        async def on_popup(popup):
+            nonlocal captured_pdf
             try:
-                btn_aceptar = page.locator("a, button, input[type='button']").filter(has_text=re.compile(r"Aceptar", re.IGNORECASE)).first
-                if await btn_aceptar.is_visible(timeout=3000):
-                    await btn_aceptar.click()
-                    await page.wait_for_timeout(1000)
+                await popup.wait_for_load_state("domcontentloaded")
+                popup.on("download", on_download)
             except Exception:
                 pass
 
-            # 1. Ingresar numero de documento
-            # Es un input de texto. Para asegurarnos, tomamos el que este visible y no sea readonly ni de tipo oculto.
-            inputs_texto = page.locator("input[type='text'], input:not([type])").filter(has=page.locator("visible=true"))
-            # Lo llenamos
-            if await inputs_texto.count() > 0:
-                await inputs_texto.first.fill(cedula)
-            else:
-                # Si no encontramos por tag generico, intentamos por id comunes
-                for id_guess in ["#txtCedula", "#txtDocumento", "#identificacion", "#numeroDocumento"]:
-                    el = page.locator(id_guess).first
-                    if await el.is_visible(timeout=1000):
-                        await el.fill(cedula)
-                        break
+        page.on("popup", on_popup)
 
-            await page.wait_for_timeout(500)
-            
-            # 2. Hacer clic en Siguiente
-            btn_siguiente = page.locator("a, button, input[type='button'], input[type='submit']").filter(has_text=re.compile(r"Siguiente|Consultar|Buscar", re.IGNORECASE)).first
-            await btn_siguiente.click()
-            
-            # 3. Esperar que aparezca el textarea de motivo de consulta
-            # Cuando carga la persona, aparece el textarea o input para el motivo y un mensaje de error si no existe.
-            await page.wait_for_timeout(4000)
-            
-            # Revisar si salio error (cedula incorrecta, etc)
-            textos_error = ["no se encuentra", "error", "incorrecta", "no registrada"]
-            body_text = await page.inner_text("body")
-            body_lower = body_text.lower()
-            if any(e in body_lower for e in textos_error) and "motivo de consulta" not in body_lower:
-                # Si hay error y no llego al paso de motivo
-                await browser.close()
-                return False, "La cédula ingresada no se encuentra registrada o es inválida.", None
+        # 4. Capturar mensajes de alerta de JavaScript nativo
+        dialog_message = None
+        async def on_dialog(dialog):
+            nonlocal dialog_message
+            dialog_message = dialog.message
+            try:
+                await dialog.accept()
+            except Exception:
+                pass
 
-            # 4. Llenar motivo de consulta
-            motivo_input = page.locator("textarea, input[type='text']").filter(has=page.locator("visible=true")).last
-            if await motivo_input.is_visible(timeout=5000):
-                await motivo_input.fill("realizar un tramite")
-            else:
+        page.on("dialog", on_dialog)
+
+        try:
+            # Navegar sin esperar networkidle (networkidle causaba timeout por scripts de analiticas)
+            await page.goto(URL_RECORD, timeout=45000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(1500)
+
+            # Verificar si hay bloqueo directo por firewall Incapsula
+            html_content = await page.content()
+            if "Incapsula" in html_content and "txtCi" not in html_content:
                 await browser.close()
-                return False, "No se encontró el campo 'Motivo de Consulta' en la página.", None
+                return False, "⚠️ El servidor del Ministerio tiene activo el filtro de seguridad Incapsula. Intenta en unos minutos.", None
+
+            # Esperar a que el campo de cedula (#txtCi) este disponible
+            try:
+                await page.wait_for_selector("#txtCi", state="visible", timeout=15000)
+            except Exception:
+                if dialog_message:
+                    await browser.close()
+                    return False, f"Alerta del Ministerio: {dialog_message}", None
+                await browser.close()
+                return False, "No se pudo cargar el formulario del Ministerio del Interior a tiempo.", None
+
+            # Asegurar que el radio button de 'Cedula de Identidad' este marcado
+            try:
+                radio_ced = page.locator("#rbtType1")
+                if await radio_ced.is_visible():
+                    await radio_ced.check()
+            except Exception:
+                pass
+
+            # 1. Ingresar numero de cedula
+            await page.fill("#txtCi", cedula)
+            await page.wait_for_timeout(300)
+
+            # 2. Clic en Siguiente 1 (#btnSig1)
+            btn_sig1 = page.locator("#btnSig1")
+            await btn_sig1.click()
+
+            # 3. Esperar a que cargue el segundo paso (aparece #txtMotivo)
+            try:
+                await page.wait_for_selector("#txtMotivo", state="visible", timeout=12000)
+            except Exception:
+                if dialog_message:
+                    await browser.close()
+                    return False, f"El portal informo: {dialog_message}", None
                 
-            await page.wait_for_timeout(500)
+                # Revisar si mostro un mensaje de error en la pagina
+                body_text = await page.inner_text("body")
+                for err_kw in ["no se encuentra", "no existe", "incorrecta", "error", "no registrada"]:
+                    if err_kw in body_text.lower():
+                        await browser.close()
+                        return False, "La cedula ingresada no se encuentra registrada o es invalida.", None
+
+                await browser.close()
+                return False, "El portal no respondio con los datos de la cedula.", None
+
+            # Extraer el nombre si esta disponible en el campo oculto #hdName o en pantalla
+            nombre = None
+            try:
+                nombre_val = await page.locator("#hdName").input_value()
+                if nombre_val and len(nombre_val.strip()) > 3:
+                    nombre = nombre_val.strip()
+            except Exception:
+                pass
+
+            # 4. Llenar motivo de consulta en #txtMotivo
+            await page.fill("#txtMotivo", "realizar un tramite")
+            await page.wait_for_timeout(400)
+
+            # 5. Clic en Siguiente 2 (#btnSig2)
+            btn_sig2 = page.locator("#btnSig2")
+            await btn_sig2.click()
+
+            # 6. Esperar a que aparezca el boton para visualizar el certificado (#btnOpen)
+            try:
+                await page.wait_for_selector("#btnOpen", state="visible", timeout=12000)
+            except Exception:
+                if dialog_message:
+                    await browser.close()
+                    return False, f"El portal informo: {dialog_message}", None
+                await browser.close()
+                return False, "No se habilito el boton para generar el certificado.", None
+
+            # 7. Clic en Visualizar Certificado (#btnOpen)
+            btn_open = page.locator("#btnOpen")
             
-            # 5. Clic en el SEGUNDO boton Siguiente (o el mismo de nuevo que se refresco)
-            botones_siguiente = page.locator("a, button, input[type='button'], input[type='submit']").filter(has_text=re.compile(r"Siguiente|Generar", re.IGNORECASE))
-            if await botones_siguiente.count() > 1:
-                await botones_siguiente.last.click()
-            else:
-                await botones_siguiente.first.click()
-                
-            await page.wait_for_timeout(4000)
-            
-            # 6. Clic en "Visualizar Certificado" o similar
-            btn_visualizar = page.locator("a, button, input").filter(has_text=re.compile(r"Visualizar|Certificado|Imprimir|Descargar", re.IGNORECASE)).first
-            
-            if await btn_visualizar.is_visible(timeout=5000):
-                async with page.expect_download(timeout=15000) as download_info:
-                    await btn_visualizar.click()
+            # Intentar clic capturando descarga si se dispara
+            try:
+                async with page.expect_download(timeout=8000) as download_info:
+                    await btn_open.click()
                 dl = await download_info.value
                 dl_path = await dl.path()
                 if dl_path:
                     with open(dl_path, "rb") as f:
-                        pdf_final = f.read()
-            else:
-                await browser.close()
-                return False, "No se encontró el botón para visualizar el certificado.", None
-                
+                        captured_pdf = f.read()
+            except Exception:
+                # Si expect_download no se disparo, tal vez abrio popup o via route_interceptor
+                pass
+
+            # Si aun no tenemos el PDF, esperar unos segundos a que la intercepcion o el popup lo capture
+            if not (captured_pdf and len(captured_pdf) > 5000):
+                for _ in range(10):
+                    if captured_pdf and len(captured_pdf) > 5000:
+                        break
+                    await asyncio.sleep(1)
+
             await browser.close()
-            
-            # Extraer un nombre (Opcional, si no se puede mandamos generico)
-            nombre = "Ciudadano"
-            
-            if pdf_final and len(pdf_final) > 5000:
-                return "ok", pdf_final, nombre
+
+            if captured_pdf and len(captured_pdf) > 5000:
+                return True, captured_pdf, nombre or "CIUDADANO"
             else:
-                return False, "No se pudo obtener el PDF del récord policial.", None
+                return False, "El portal proceso la solicitud pero no entrego el documento PDF.", None
 
         except Exception as e:
             try:
                 await browser.close()
             except Exception:
                 pass
-            return False, f"Error inesperado: {str(e)}", None
+            return False, f"Error en procesamiento: {str(e)}", None

@@ -34,10 +34,11 @@ async def handle_message_record(update: Update, context: ContextTypes.DEFAULT_TY
             await asyncio.sleep(2)
 
     elapsed = time.time() - t0
-    
     if success:
+        nombre_str = f"👤 **Nombre:** {nombre}\n" if nombre and nombre != "CIUDADANO" else ""
         caption = (
             f"✅ **RÉCORD POLICIAL GENERADO!** ({elapsed:.1f}s)\n\n"
+            f"{nombre_str}"
             f"🆔 **Cédula:** `{cedula}`\n"
             f"📄 *Certificado oficial del Ministerio del Interior.*"
         )
