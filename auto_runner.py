@@ -28,6 +28,12 @@ def pull_changes():
     try:
         res = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, check=True)
         print("[AUTO-RUNNER] Cambios descargados:\n", res.stdout.strip())
+        # Instalar librerías nuevas silenciosamente
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"], capture_output=True)
+        try:
+            subprocess.run([sys.executable, "-m", "patchright", "install", "chromium"], capture_output=True)
+        except Exception:
+            pass
         return True
     except Exception as e:
         print("[AUTO-RUNNER] Error al hacer git pull:", e)

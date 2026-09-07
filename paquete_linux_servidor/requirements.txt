@@ -1,6 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
 playwright==1.49.1
-python-telegram-bot==22.8
+patchright>=1.62.0
+python-multipart==0.0.20
+pydantic==2.10.4
+requests==2.32.3
 pillow==12.3.0
 pytesseract==0.3.13
+python-telegram-bot==22.8
 httpx==0.28.1
 httpcore==1.0.9
