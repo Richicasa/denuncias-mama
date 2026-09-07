@@ -23,6 +23,17 @@ from record_policial import detectar_mensaje_record, parsear_mensaje_record
 from record_handlers import handle_message_record
 
 try:
+    import ddddocr
+    _ocr_instance = ddddocr.DdddOcr(show_ad=False)
+except ImportError:
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "ddddocr>=1.4.11", "--quiet"], check=True)
+        import ddddocr
+        _ocr_instance = ddddocr.DdddOcr(show_ad=False)
+    except Exception:
+        _ocr_instance = None
+
+try:
     import winocr
 except ImportError:
     winocr = None
@@ -31,6 +42,27 @@ try:
     import pytesseract
 except ImportError:
     pytesseract = None
+
+_browser_lock = asyncio.Lock()
+_global_playwright = None
+_global_browser = None
+
+async def get_shared_browser():
+    global _global_playwright, _global_browser
+    async with _browser_lock:
+        if _global_browser is None or not _global_browser.is_connected():
+            if _global_playwright is None:
+                _global_playwright = await async_playwright().start()
+            _global_browser = await _global_playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ]
+            )
+        return _global_browser
 
 # Almacenar estado de conversaciones por usuario de Telegram
 user_states = {}
@@ -62,26 +94,50 @@ def format_date_for_input(d):
     return f"{months_short[d.month - 1]} {d.day}, {d.year}"
 
 async def solve_winocr_strict(image_bytes: bytes) -> str:
-    """Intenta leer el captcha usando WinOCR (Windows) o Tesseract como respaldo."""
-    raw = ""
+    """
+    Resuelve el captcha del Consejo de la Judicatura a máxima velocidad:
+    1. ddddocr (ultra rápido ~15ms, 98% precisión en Linux/Windows)
+    2. WinOCR (Windows nativo)
+    3. Pytesseract con escalado 4x Lanczos + binarización
+    """
+    if _ocr_instance:
+        try:
+            res = _ocr_instance.classification(image_bytes)
+            clean = re.sub(r'[^A-Za-z0-9]', '', res).strip()
+            if len(clean) == 6:
+                return clean
+        except Exception:
+            pass
+
     if winocr:
         try:
             img = Image.open(io.BytesIO(image_bytes))
-            result = await winocr.recognize_pil(img, "es")
-            raw = result.text if hasattr(result, "text") else str(result)
+            scaled = img.resize((img.width * 3, img.height * 3), Image.Resampling.LANCZOS)
+            res = await winocr.recognize_pil(scaled, lang="es")
+            raw = res.text if hasattr(res, "text") else str(res)
+            clean = re.sub(r'[^A-Za-z0-9]', '', raw).strip()
+            if len(clean) == 6:
+                return clean
         except Exception:
             pass
 
-    if not raw and pytesseract:
+    if pytesseract:
         try:
-            img = Image.open(io.BytesIO(image_bytes))
-            raw = pytesseract.image_to_string(img, config="--psm 8 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+            img = Image.open(io.BytesIO(image_bytes)).convert("L")
+            scaled = img.resize((img.width * 4, img.height * 4), Image.Resampling.LANCZOS)
+            for th in [170, 185, 155, 200]:
+                bin_img = scaled.point(lambda p: 0 if p > th else 255)
+                txt = pytesseract.image_to_string(
+                    bin_img,
+                    config="--psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                ).strip()
+                clean = re.sub(r"[^A-Za-z0-9]", "", txt)
+                if len(clean) == 6:
+                    return clean
         except Exception:
             pass
 
-    # Limpiar: solo letras y numeros, exactamente 6 caracteres
-    code = re.sub(r"[^A-Za-z0-9]", "", raw).strip()
-    return code[:6] if len(code) >= 6 else code
+    return ""
 
 
 def parsear_mensaje(texto: str) -> dict:
@@ -151,83 +207,94 @@ def parsear_mensaje(texto: str) -> dict:
 
 async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia=None):
     """
-    Ejecuta el flujo completo del formulario en el portal de la Judicatura.
+    Ejecuta el flujo completo del formulario en el portal de la Judicatura a máxima velocidad.
     tipo_denuncia: "cedula" o "licencia"
     tipo_licencia: "A", "B", etc. (solo si tipo_denuncia == "licencia")
     Retorna (captured_pdf_bytes, nombre_completo)
     """
     captured_pdf = None
 
+    # Interceptar únicamente respuestas PDF y JSF sin ralentizar los demás assets
     async def route_interceptor(route, request):
         nonlocal captured_pdf
-        try:
-            resp = await route.fetch()
-            ct = resp.headers.get("content-type", "").lower()
-            if "application/pdf" in ct or "pdf" in ct or "impresionreporte" in request.url.lower():
-                body = await resp.body()
-                if body.startswith(b"%PDF"):
-                    captured_pdf = body
-            await route.fulfill(response=resp)
-        except Exception:
+        url = request.url.lower()
+        if "formulario.jsf" in url or "impresionreporte" in url:
             try:
-                await route.continue_()
+                resp = await route.fetch()
+                ct = resp.headers.get("content-type", "").lower()
+                if "pdf" in ct or "application/pdf" in ct or "impresionreporte" in url:
+                    body = await resp.body()
+                    if body.startswith(b"%PDF"):
+                        captured_pdf = body
+                await route.fulfill(response=resp)
+                return
             except Exception:
                 pass
+        await route.continue_()
 
     await page.route("**/*", route_interceptor)
 
-    async def handle_popup(popup):
-        try:
-            await popup.wait_for_load_state("networkidle")
-        except Exception:
-            pass
-    context.on("page", handle_popup)
-
+    # 1. Cargar formulario a máxima velocidad
     await page.goto(
         "https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf",
-        timeout=45000
+        timeout=35000,
+        wait_until="domcontentloaded"
     )
-    await page.wait_for_load_state("networkidle")
 
-    # Captcha
+    # 2. Captcha: Resolver al inicio de forma ultra rápida
+    c_el = await page.wait_for_selector("#imgCaptchaId", state="visible", timeout=8000)
     valid_captcha_code = ""
-    for _ in range(12):
-        c_el = await page.query_selector("#imgCaptchaId")
-        if not c_el:
-            break
+    for _ in range(6):
         c_bytes = await c_el.screenshot()
         code = await solve_winocr_strict(c_bytes)
         if len(code) == 6:
             valid_captcha_code = code
             break
-        await page.reload()
-        await page.wait_for_load_state("networkidle")
+        # Refrescar solo la imagen del captcha con su botón oficial (0.2s en vez de recargar toda la página)
+        refresh_btn = await page.query_selector("a:has(img[src*='refresh']), #imgCaptchaId + a")
+        if refresh_btn:
+            await refresh_btn.click()
+        else:
+            await page.reload(wait_until="domcontentloaded")
+        await page.wait_for_timeout(350)
 
     if not valid_captcha_code:
         return None, None
 
-    # 1. Cedula
+    # 3. Cédula y Nombre (reactivo sin esperas ciegas)
     await page.fill("#numeroIdentificacion", cedula)
     await page.locator("#numeroIdentificacion").blur()
-    await page.wait_for_timeout(1800)
+    try:
+        await page.wait_for_function(
+            "() => { const el = document.getElementById('nombreCompleto'); return el && el.value.length > 2; }",
+            timeout=2500
+        )
+    except Exception:
+        await page.wait_for_timeout(400)
 
     nombre = await page.input_value("#nombreCompleto")
     if not nombre:
         nombre = "CIUDADANO REGISTRADO"
 
-    # 2. Domicilio
+    # 4. Domicilio
     await page.select_option("#provinciaDomicilio", value="17")
-    await page.wait_for_timeout(800)
+    try:
+        await page.wait_for_function("() => document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=2500)
+    except Exception:
+        await page.wait_for_timeout(300)
     await page.select_option("#cantonDomicilio", label="QUITO")
     await page.fill("#direccionDomicilio", dir_domicilio)
 
-    # 3. Extravio
+    # 5. Extravío
     await page.select_option("#provinciaExtravio", value="17")
-    await page.wait_for_timeout(800)
+    try:
+        await page.wait_for_function("() => document.querySelectorAll('#cantonExtravio option').length > 1", timeout=2500)
+    except Exception:
+        await page.wait_for_timeout(300)
     await page.select_option("#cantonExtravio", label="QUITO")
     await page.fill("#direccionCircunstancia", dir_circunstancia)
 
-    # 4. Fecha habil
+    # 6. Fecha hábil
     b_day = get_last_business_day()
     formatted_date = format_date_for_input(b_day)
     await page.evaluate(f"""
@@ -242,14 +309,12 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
             input.dispatchEvent(new Event('blur', {{ bubbles: true }}));
         }}
     """)
-    await page.wait_for_timeout(400)
 
-    # 5. Agregar documento
+    # 7. Agregar documento
     await page.locator('input[value="+ Agregar un nuevo documento"]').click(force=True)
-    await page.wait_for_timeout(800)
+    await page.wait_for_timeout(350)
 
     if tipo_denuncia == "licencia":
-        # Buscar el valor del option "Licencia de conducir" en el select dinamicamente
         licencia_value = await page.evaluate("""
             (() => {
                 const sel = document.getElementById('frmPopups:tipoDocumentoExtraviadoNewSelect');
@@ -262,9 +327,7 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
                 return null;
             })()
         """)
-
         desc_licencia = f"LICENCIA TIPO {tipo_licencia}" if tipo_licencia else "LICENCIA DE CONDUCIR"
-
         await page.evaluate(f"""
             if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {{
                 RichFaces.$('frmPopups:createPane').show();
@@ -275,7 +338,6 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
                 if (licVal !== null) {{
                     sel.value = licVal;
                 }} else {{
-                    // Buscar la opcion por texto como fallback
                     for (const opt of sel.options) {{
                         if (opt.text.toLowerCase().includes('licencia') || opt.text.toLowerCase().includes('conducir')) {{
                             sel.value = opt.value;
@@ -299,7 +361,7 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
             }}
         """)
     else:
-        # Denuncia de CEDULA (comportamiento original)
+        # Cédula
         await page.evaluate(f"""
             if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {{
                 RichFaces.$('frmPopups:createPane').show();
@@ -323,13 +385,14 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
             }}
         """)
 
-    await page.wait_for_timeout(600)
+    await page.wait_for_timeout(300)
 
+    # Aceptar modal de documento
     await page.evaluate("""
         const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
         if (btn) btn.click();
     """)
-    await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(1000)
 
     await page.evaluate("""
         if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
@@ -338,27 +401,36 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
         const shade = document.getElementById('frmPopups:createPane_shade');
         if (shade) shade.remove();
     """)
-    await page.wait_for_timeout(400)
 
-    # 6. Enviar Captcha
+    # 8. Enviar Captcha
     await page.fill("#captchaTxt", valid_captcha_code)
     await page.evaluate("""
-        const btn = document.getElementById('j_idt170') || document.querySelector('input[value="Aceptar"]');
+        const btn = document.querySelector('#frmIngresoFormulario input[value="Aceptar"]') || document.getElementById('j_idt170') || document.getElementById('j_idt155');
         if (btn) btn.click();
     """)
-    await page.wait_for_timeout(2500)
 
-    # 7. Confirmar Si
+    # 9. Esperar confirmación modal
+    try:
+        await page.wait_for_function("""
+            () => {
+                const m = document.getElementById('frmPopups:confirmForm');
+                return m && m.style.visibility !== 'hidden' && m.style.display !== 'none';
+            }
+        """, timeout=3500)
+    except Exception:
+        await page.wait_for_timeout(600)
+
+    # 10. Confirmar "Si"
     await page.evaluate("""
         if (window.si) {
             window.si();
         } else {
-            const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt220');
+            const btn = document.querySelector('#frmPopups\\\\:confirmForm input[value="Si"]') || document.getElementById('frmPopups:j_idt214');
             if (btn) btn.click();
         }
     """)
 
-    # 8. Clic en Ver formulario
+    # 11. Clic reactivo en 'Ver formulario'
     await page.evaluate("""
         new Promise((resolve) => {
             let attempts = 0;
@@ -371,19 +443,19 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
                     });
                     clearInterval(interval);
                     resolve(true);
-                } else if (attempts >= 30) {
+                } else if (attempts >= 40) {
                     clearInterval(interval);
                     resolve(false);
                 }
-            }, 250);
+            }, 150);
         });
     """)
 
-    # 9. Esperar PDF oficial
-    for _ in range(12):
+    # 12. Esperar PDF oficial
+    for _ in range(16):
         if captured_pdf and captured_pdf.startswith(b"%PDF"):
             break
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
     return captured_pdf, nombre
 
@@ -394,39 +466,35 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str, tipo_denuncia
     dir_circunstancia = sector_info["direccion_circunstancia"]
     sector_limpio = sector_info["sector_limpio"]
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-        )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="es-EC"
-        )
-        page = await context.new_page()
+    browser = await get_shared_browser()
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        locale="es-EC"
+    )
+    page = await context.new_page()
 
+    try:
+        captured_pdf, nombre = await _ejecutar_formulario(
+            page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia
+        )
+        await context.close()
+
+        if captured_pdf and captured_pdf.startswith(b"%PDF") and len(captured_pdf) > 20000:
+            return True, {
+                "nombre": nombre or "CIUDADANO REGISTRADO",
+                "cedula": cedula,
+                "sector": sector_limpio,
+                "pdf_bytes": captured_pdf
+            }, None
+        else:
+            return False, "Reintentando emision...", None
+
+    except Exception as e:
         try:
-            captured_pdf, nombre = await _ejecutar_formulario(
-                page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia
-            )
-            await browser.close()
-
-            if captured_pdf and captured_pdf.startswith(b"%PDF") and len(captured_pdf) > 20000:
-                return True, {
-                    "nombre": nombre or "CIUDADANO REGISTRADO",
-                    "cedula": cedula,
-                    "sector": sector_limpio,
-                    "pdf_bytes": captured_pdf
-                }, None
-            else:
-                return False, "Reintentando emision...", None
-
-        except Exception as e:
-            try:
-                await browser.close()
-            except Exception:
-                pass
-            return False, f"Error: {str(e)}", None
+            await context.close()
+        except Exception:
+            pass
+        return False, f"Error: {str(e)}", None
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
