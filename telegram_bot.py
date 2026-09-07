@@ -430,14 +430,34 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str, tipo_denuncia
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "👋 **Hola! Soy tu Asistente para Denuncias Judiciales de Extravio.**\n\n"
-        "Puedo generar tu denuncia oficial del Consejo de la Judicatura y enviarte el PDF listo para imprimir.\n\n"
-        "📝 **Puedo procesar dos tipos de denuncia:**\n"
-        "• **Cedula de Identidad** — *Ejemplo:* `1708927502 Sector El Recreo`\n"
-        "• **Licencia de conducir** — *Ejemplo:* `1708927502 Solanda licencia tipo B`\n\n"
-        "💡 Puedes escribir los datos en cualquier orden, los reconozco automaticamente."
+        "👋 **¡Hola! Soy tu Asistente Multi-Trámites.**\n\n"
+        "Puedo emitir documentos oficiales y enviarte el PDF listo:\n\n"
+        "1️⃣ **Denuncias de Extravío (Judicatura):**\n"
+        "• *Cédula:* `1708927502 Sector El Recreo`\n"
+        "• *Licencia:* `1708927502 Solanda tipo B`\n\n"
+        "2️⃣ **Orden de Pago de Licencia (ANT):**\n"
+        "• *Ejemplo:* `orden de pago renovacion 1708927502 tipo B`\n\n"
+        "3️⃣ **Récord Policial (Ministerio del Interior):**\n"
+        "• *Ejemplo:* `record policial 1708927502`\n\n"
+        "🔄 **Comandos:**\n"
+        "• `/actualizar` — Descarga actualizaciones de GitHub y reinicia el bot automáticamente."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
+
+
+async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔄 Buscando actualizaciones en GitHub...")
+    try:
+        res = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True)
+        salida = res.stdout.strip()
+        if "Already up to date" in salida or "Ya está actualizado" in salida:
+            await msg.edit_text("✅ El bot ya está corriendo la última versión disponible.")
+        else:
+            await msg.edit_text(f"🚀 ¡Actualizado con éxito!\n\n`{salida[:200]}`\n\nReiniciando bot...")
+            await asyncio.sleep(1)
+            sys.exit(0)
+    except Exception as e:
+        await msg.edit_text(f"❌ Error al actualizar: {e}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -655,6 +675,7 @@ def main():
 
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("actualizar", update_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
 
