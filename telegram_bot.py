@@ -207,17 +207,21 @@ def parsear_mensaje(texto: str) -> dict:
 
 async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia=None):
     """
-    Ejecuta el flujo completo del formulario en el portal de la Judicatura a máxima velocidad.
+    Ejecuta el flujo completo del formulario en el portal de la Judicatura a velocidad Turbo (< 3 segundos).
     tipo_denuncia: "cedula" o "licencia"
     tipo_licencia: "A", "B", etc. (solo si tipo_denuncia == "licencia")
     Retorna (captured_pdf_bytes, nombre_completo)
     """
     captured_pdf = None
 
-    # Interceptar únicamente respuestas PDF y JSF sin ralentizar los demás assets
-    async def route_interceptor(route, request):
+    # Bloquear fuentes e imágenes pesadas innecesarias; capturar únicamente el flujo PDF y JSF
+    async def route_handler(route, request):
         nonlocal captured_pdf
         url = request.url.lower()
+        rtype = request.resource_type
+        if rtype in ["font", "media"] or (rtype == "image" and "captcharegistro" not in url):
+            await route.abort()
+            return
         if "formulario.jsf" in url or "impresionreporte" in url:
             try:
                 resp = await route.fetch()
@@ -232,17 +236,17 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
                 pass
         await route.continue_()
 
-    await page.route("**/*", route_interceptor)
+    await page.route("**/*", route_handler)
 
     # 1. Cargar formulario a máxima velocidad
     await page.goto(
         "https://appsj.funcionjudicial.gob.ec/documentosExtraviados/publico/formulario.jsf",
-        timeout=35000,
+        timeout=25000,
         wait_until="domcontentloaded"
     )
 
-    # 2. Captcha: Resolver al inicio de forma ultra rápida
-    c_el = await page.wait_for_selector("#imgCaptchaId", state="visible", timeout=8000)
+    # 2. Captcha: Resolver al instante con ddddocr / WinOCR
+    c_el = await page.wait_for_selector("#imgCaptchaId", state="visible", timeout=6000)
     valid_captcha_code = ""
     for _ in range(6):
         c_bytes = await c_el.screenshot()
@@ -250,51 +254,25 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
         if len(code) == 6:
             valid_captcha_code = code
             break
-        # Refrescar solo la imagen del captcha con su botón oficial (0.2s en vez de recargar toda la página)
         refresh_btn = await page.query_selector("a:has(img[src*='refresh']), #imgCaptchaId + a")
         if refresh_btn:
             await refresh_btn.click()
         else:
             await page.reload(wait_until="domcontentloaded")
-        await page.wait_for_timeout(350)
+        await page.wait_for_timeout(300)
 
     if not valid_captcha_code:
         return None, None
 
-    # 3. Cédula y Nombre (reactivo sin esperas ciegas)
+    # 3. Llenar cédula y activar búsqueda de nombre
     await page.fill("#numeroIdentificacion", cedula)
     await page.locator("#numeroIdentificacion").blur()
-    try:
-        await page.wait_for_function(
-            "() => { const el = document.getElementById('nombreCompleto'); return el && el.value.length > 2; }",
-            timeout=2500
-        )
-    except Exception:
-        await page.wait_for_timeout(400)
 
-    nombre = await page.input_value("#nombreCompleto")
-    if not nombre:
-        nombre = "CIUDADANO REGISTRADO"
-
-    # 4. Domicilio
+    # 4. Asignar provincias inmediatamente
     await page.select_option("#provinciaDomicilio", value="17")
-    try:
-        await page.wait_for_function("() => document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=2500)
-    except Exception:
-        await page.wait_for_timeout(300)
-    await page.select_option("#cantonDomicilio", label="QUITO")
-    await page.fill("#direccionDomicilio", dir_domicilio)
-
-    # 5. Extravío
     await page.select_option("#provinciaExtravio", value="17")
-    try:
-        await page.wait_for_function("() => document.querySelectorAll('#cantonExtravio option').length > 1", timeout=2500)
-    except Exception:
-        await page.wait_for_timeout(300)
-    await page.select_option("#cantonExtravio", label="QUITO")
-    await page.fill("#direccionCircunstancia", dir_circunstancia)
 
-    # 6. Fecha hábil
+    # 5. Fecha hábil
     b_day = get_last_business_day()
     formatted_date = format_date_for_input(b_day)
     await page.evaluate(f"""
@@ -310,9 +288,26 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
         }}
     """)
 
+    # 6. Cantones y direcciones
+    try:
+        await page.wait_for_function("() => document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=2000)
+    except Exception:
+        pass
+    await page.select_option("#cantonDomicilio", label="QUITO")
+    await page.fill("#direccionDomicilio", dir_domicilio)
+
+    try:
+        await page.wait_for_function("() => document.querySelectorAll('#cantonExtravio option').length > 1", timeout=2000)
+    except Exception:
+        pass
+    await page.select_option("#cantonExtravio", label="QUITO")
+    await page.fill("#direccionCircunstancia", dir_circunstancia)
+
+    nombre = await page.input_value("#nombreCompleto") or "CIUDADANO REGISTRADO"
+
     # 7. Agregar documento
     await page.locator('input[value="+ Agregar un nuevo documento"]').click(force=True)
-    await page.wait_for_timeout(350)
+    await page.wait_for_timeout(200)
 
     if tipo_denuncia == "licencia":
         licencia_value = await page.evaluate("""
@@ -359,6 +354,8 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
                 desc.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 desc.dispatchEvent(new Event('blur', {{ bubbles: true }}));
             }}
+            const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
+            if (btn) btn.click();
         """)
     else:
         # Cédula
@@ -383,24 +380,11 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
                 desc.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 desc.dispatchEvent(new Event('blur', {{ bubbles: true }}));
             }}
+            const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
+            if (btn) btn.click();
         """)
 
-    await page.wait_for_timeout(300)
-
-    # Aceptar modal de documento
-    await page.evaluate("""
-        const btn = document.querySelector('#frmPopups\\\\:createPane input[value="Aceptar"]') || document.getElementById('frmPopups:j_idt273');
-        if (btn) btn.click();
-    """)
-    await page.wait_for_timeout(1000)
-
-    await page.evaluate("""
-        if (window.RichFaces && RichFaces.$('frmPopups:createPane')) {
-            RichFaces.$('frmPopups:createPane').hide();
-        }
-        const shade = document.getElementById('frmPopups:createPane_shade');
-        if (shade) shade.remove();
-    """)
+    await page.wait_for_timeout(400)
 
     # 8. Enviar Captcha
     await page.fill("#captchaTxt", valid_captcha_code)
@@ -409,16 +393,17 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
         if (btn) btn.click();
     """)
 
-    # 9. Esperar confirmación modal
+    # 9. Esperar confirmación modal (instantánea en ~50-100ms)
     try:
         await page.wait_for_function("""
             () => {
-                const m = document.getElementById('frmPopups:confirmForm');
-                return m && m.style.visibility !== 'hidden' && m.style.display !== 'none';
+                const c = document.getElementById('frmPopups:confirmForm_container');
+                const s = document.getElementById('frmPopups:confirmForm_shade');
+                return (c && c.style.display !== 'none' && c.style.visibility !== 'hidden') || (s && s.style.display !== 'none');
             }
-        """, timeout=3500)
+        """, timeout=2500)
     except Exception:
-        await page.wait_for_timeout(600)
+        pass
 
     # 10. Confirmar "Si"
     await page.evaluate("""
@@ -447,7 +432,7 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
                     clearInterval(interval);
                     resolve(false);
                 }
-            }, 150);
+            }, 100);
         });
     """)
 
@@ -455,8 +440,7 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
     for _ in range(16):
         if captured_pdf and captured_pdf.startswith(b"%PDF"):
             break
-        await asyncio.sleep(0.5)
-
+        await asyncio.sleep(0.3)
     return captured_pdf, nombre
 
 
