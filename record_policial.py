@@ -1,12 +1,26 @@
 import asyncio
 import io
+import os
 import re
+import sys
 import time
 
+# Asegurar DISPLAY en Linux para modo visual
+if sys.platform != "win32" and "DISPLAY" not in os.environ:
+    os.environ["DISPLAY"] = ":0"
+
+# Importar o auto-instalar patchright
 try:
     from patchright.async_api import async_playwright
 except ImportError:
-    from playwright.async_api import async_playwright
+    import subprocess
+    print("[RECORD] Auto-instalando patchright y dependencias anti-detección...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "patchright>=1.62.0", "--quiet"], check=True)
+    try:
+        subprocess.run([sys.executable, "-m", "patchright", "install", "chromium"], capture_output=True)
+    except Exception:
+        pass
+    from patchright.async_api import async_playwright
 
 URL_RECORD = "https://certificados.ministeriodelinterior.gob.ec/gestorcertificados/antecedentes/"
 
@@ -27,7 +41,7 @@ def parsear_mensaje_record(texto: str) -> str | None:
 async def procesar_record_policial(cedula: str) -> tuple:
     """
     Genera el Certificado de Antecedentes Penales (Record Policial).
-    Burlar Imperva/hCaptcha con modo headed y descarga directa.
+    Burlar Imperva/hCaptcha con patchright en modo visual y descarga directa.
     Retorna: (success: bool, pdf_bytes_or_error: bytes|str, nombre: str|None)
     """
     async with async_playwright() as p:
@@ -51,10 +65,10 @@ async def procesar_record_policial(cedula: str) -> tuple:
         try:
             # 1. Cargar portal
             await page.goto(URL_RECORD, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(2500)
+            await page.wait_for_timeout(3000)
 
             # 2. Detectar y resolver hCaptcha de Imperva
-            for _ in range(8):
+            for i in range(10):
                 resolved = False
                 for frame in page.frames:
                     if "hcaptcha.html" in frame.url and "frame=checkbox" in frame.url:
@@ -69,18 +83,28 @@ async def procesar_record_policial(cedula: str) -> tuple:
                 await asyncio.sleep(1)
 
             # 3. Aceptar Términos y Condiciones
-            await page.evaluate("""
-                () => {
-                    const b = Array.from(document.querySelectorAll('.ui-dialog button, button')).find(x => x.innerText.trim() === 'Aceptar');
-                    if (b) b.click();
-                }
-            """)
+            for _ in range(5):
+                accepted = await page.evaluate("""
+                    () => {
+                        const b = Array.from(document.querySelectorAll('.ui-dialog button, button')).find(x => x.innerText.trim() === 'Aceptar');
+                        if (b) { b.click(); return true; }
+                        return false;
+                    }
+                """)
+                if accepted:
+                    break
+                await asyncio.sleep(1)
+
             await page.wait_for_timeout(1000)
 
             # 4. Esperar formulario y llenar cédula
             try:
                 await page.wait_for_selector("#txtCi", state="visible", timeout=15000)
             except Exception:
+                try:
+                    await page.screenshot(path="error_record_screen.png")
+                except Exception:
+                    pass
                 await browser.close()
                 return False, "No se pudo cargar el formulario del Ministerio (filtro de seguridad activo). Intenta de nuevo.", None
 
@@ -96,6 +120,10 @@ async def procesar_record_policial(cedula: str) -> tuple:
                     if err_kw in body_text.lower():
                         await browser.close()
                         return False, "La cédula ingresada no se encuentra registrada o es inválida.", None
+                try:
+                    await page.screenshot(path="error_record_screen.png")
+                except Exception:
+                    pass
                 await browser.close()
                 return False, "El portal no devolvió datos para esta cédula.", None
 
@@ -138,6 +166,10 @@ async def procesar_record_policial(cedula: str) -> tuple:
                 return False, "El portal no entregó un archivo PDF válido.", None
 
         except Exception as e:
+            try:
+                await page.screenshot(path="error_record_screen.png")
+            except Exception:
+                pass
             try:
                 await browser.close()
             except Exception:

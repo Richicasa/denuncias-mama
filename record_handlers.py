@@ -1,6 +1,7 @@
 from telegram import Update, InputFile
 from telegram.ext import ContextTypes
 import io
+import os
 import time
 import asyncio
 from record_policial import procesar_record_policial
@@ -61,4 +62,16 @@ async def handle_message_record(update: Update, context: ContextTypes.DEFAULT_TY
                 f"❌ **Error al generar el récord policial:**\n{error_msg}",
                 parse_mode="Markdown"
             )
+            # Si se generó captura de pantalla del error, enviarla
+            if os.path.exists("error_record_screen.png"):
+                try:
+                    with open("error_record_screen.png", "rb") as photo:
+                        await update.message.reply_photo(
+                            photo=photo,
+                            caption="📸 *Captura del navegador al momento de la falla.*",
+                            parse_mode="Markdown"
+                        )
+                    os.remove("error_record_screen.png")
+                except Exception:
+                    pass
         except: pass

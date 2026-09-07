@@ -447,16 +447,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🔄 Buscando actualizaciones en GitHub...")
+    msg = await update.message.reply_text("🔄 Buscando actualizaciones en GitHub e instalando componentes...")
     try:
         res = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True)
         salida = res.stdout.strip()
-        if "Already up to date" in salida or "Ya está actualizado" in salida:
-            await msg.edit_text("✅ El bot ya está corriendo la última versión disponible.")
-        else:
-            await msg.edit_text(f"🚀 ¡Actualizado con éxito!\n\n`{salida[:200]}`\n\nReiniciando bot automáticamente...")
-            await asyncio.sleep(1)
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+        
+        # Asegurar que todas las librerías necesarias estén instaladas
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"], capture_output=True)
+        try:
+            subprocess.run([sys.executable, "-m", "patchright", "install", "chromium"], capture_output=True)
+        except Exception:
+            pass
+
+        await msg.edit_text(f"🚀 ¡Actualización y componentes listos!\n\n`{salida[:200]}`\n\nReiniciando bot automáticamente...")
+        await asyncio.sleep(1)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
         await msg.edit_text(f"❌ Error al actualizar: {e}")
 
