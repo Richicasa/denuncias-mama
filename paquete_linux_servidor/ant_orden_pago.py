@@ -22,9 +22,9 @@ TRAMITE_MAP = [
     ("emision",     "PRIMERA"),
     ("duplicado",   "DUPLICADO"),
     ("duplicar",    "DUPLICADO"),
-    ("renovacion",  "RENOVACION"),
-    ("renovar",     "RENOVACION"),
-    ("renov",       "RENOVACION"),
+    ("renovacion",  "RENOVACI"),
+    ("renovar",     "RENOVACI"),
+    ("renov",       "RENOVACI"),
 ]
 
 

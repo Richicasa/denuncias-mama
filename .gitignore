@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 downloads/
 .env
+.browser_profile/
+*.png
+*.pdf
+test_*.py
