@@ -79,27 +79,20 @@ async def procesar_record_policial(cedula: str) -> tuple:
                 pass
 
             # 1. Ingresar numero de documento
-            # Es un input de texto. Para asegurarnos, tomamos el que este visible y no sea readonly ni de tipo oculto.
-            inputs_texto = page.locator("input[type='text'], input:not([type])").filter(has=page.locator("visible=true"))
-            # Lo llenamos
-            if await inputs_texto.count() > 0:
-                await inputs_texto.first.fill(cedula)
+            el_cedula = page.locator("#txtCi").first
+            if await el_cedula.is_visible(timeout=5000):
+                await el_cedula.fill(cedula)
             else:
-                # Si no encontramos por tag generico, intentamos por id comunes
-                for id_guess in ["#txtCedula", "#txtDocumento", "#identificacion", "#numeroDocumento"]:
-                    el = page.locator(id_guess).first
-                    if await el.is_visible(timeout=1000):
-                        await el.fill(cedula)
-                        break
+                await browser.close()
+                return False, "No se encontró el campo para ingresar la cédula.", None
 
             await page.wait_for_timeout(500)
             
-            # 2. Hacer clic en Siguiente
-            btn_siguiente = page.locator("a, button, input[type='button'], input[type='submit']").filter(has_text=re.compile(r"Siguiente|Consultar|Buscar", re.IGNORECASE)).first
-            await btn_siguiente.click()
+            # 2. Hacer clic en Siguiente 1
+            btn_siguiente1 = page.locator("#btnSig1").first
+            await btn_siguiente1.click()
             
             # 3. Esperar que aparezca el textarea de motivo de consulta
-            # Cuando carga la persona, aparece el textarea o input para el motivo y un mensaje de error si no existe.
             await page.wait_for_timeout(4000)
             
             # Revisar si salio error (cedula incorrecta, etc)
@@ -107,12 +100,11 @@ async def procesar_record_policial(cedula: str) -> tuple:
             body_text = await page.inner_text("body")
             body_lower = body_text.lower()
             if any(e in body_lower for e in textos_error) and "motivo de consulta" not in body_lower:
-                # Si hay error y no llego al paso de motivo
                 await browser.close()
                 return False, "La cédula ingresada no se encuentra registrada o es inválida.", None
 
             # 4. Llenar motivo de consulta
-            motivo_input = page.locator("textarea, input[type='text']").filter(has=page.locator("visible=true")).last
+            motivo_input = page.locator("#txtMotivo").first
             if await motivo_input.is_visible(timeout=5000):
                 await motivo_input.fill("realizar un tramite")
             else:
@@ -121,17 +113,14 @@ async def procesar_record_policial(cedula: str) -> tuple:
                 
             await page.wait_for_timeout(500)
             
-            # 5. Clic en el SEGUNDO boton Siguiente (o el mismo de nuevo que se refresco)
-            botones_siguiente = page.locator("a, button, input[type='button'], input[type='submit']").filter(has_text=re.compile(r"Siguiente|Generar", re.IGNORECASE))
-            if await botones_siguiente.count() > 1:
-                await botones_siguiente.last.click()
-            else:
-                await botones_siguiente.first.click()
+            # 5. Clic en el SEGUNDO boton Siguiente
+            btn_siguiente2 = page.locator("#btnSig2").first
+            await btn_siguiente2.click()
                 
             await page.wait_for_timeout(4000)
             
             # 6. Clic en "Visualizar Certificado" o similar
-            btn_visualizar = page.locator("a, button, input").filter(has_text=re.compile(r"Visualizar|Certificado|Imprimir|Descargar", re.IGNORECASE)).first
+            btn_visualizar = page.locator("#btnOpen").first
             
             if await btn_visualizar.is_visible(timeout=5000):
                 async with page.expect_download(timeout=15000) as download_info:
