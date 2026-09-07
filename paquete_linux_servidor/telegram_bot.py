@@ -25,9 +25,9 @@ from record_handlers import handle_message_record
 try:
     import ddddocr
     _ocr_instance = ddddocr.DdddOcr(show_ad=False)
-except ImportError:
+except Exception:
     try:
-        subprocess.run([sys.executable, "-m", "pip", "install", "ddddocr>=1.4.11", "--quiet"], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "opencv-python-headless", "ddddocr>=1.4.11", "--quiet"], check=True)
         import ddddocr
         _ocr_instance = ddddocr.DdddOcr(show_ad=False)
     except Exception:
@@ -245,34 +245,15 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
         wait_until="domcontentloaded"
     )
 
-    # 2. Captcha: Resolver al instante con ddddocr / WinOCR
-    c_el = await page.wait_for_selector("#imgCaptchaId", state="visible", timeout=6000)
-    valid_captcha_code = ""
-    for _ in range(6):
-        c_bytes = await c_el.screenshot()
-        code = await solve_winocr_strict(c_bytes)
-        if len(code) == 6:
-            valid_captcha_code = code
-            break
-        refresh_btn = await page.query_selector("a:has(img[src*='refresh']), #imgCaptchaId + a")
-        if refresh_btn:
-            await refresh_btn.click()
-        else:
-            await page.reload(wait_until="domcontentloaded")
-        await page.wait_for_timeout(300)
-
-    if not valid_captcha_code:
-        return None, None
-
-    # 3. Llenar cédula y activar búsqueda de nombre
+    # 2. Llenar cédula y activar búsqueda de nombre
     await page.fill("#numeroIdentificacion", cedula)
     await page.locator("#numeroIdentificacion").blur()
 
-    # 4. Asignar provincias inmediatamente
+    # 3. Asignar provincias inmediatamente
     await page.select_option("#provinciaDomicilio", value="17")
     await page.select_option("#provinciaExtravio", value="17")
 
-    # 5. Fecha hábil
+    # 4. Fecha hábil
     b_day = get_last_business_day()
     formatted_date = format_date_for_input(b_day)
     await page.evaluate(f"""
@@ -288,7 +269,7 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
         }}
     """)
 
-    # 6. Cantones y direcciones
+    # 5. Cantones y direcciones
     try:
         await page.wait_for_function("() => document.querySelectorAll('#cantonDomicilio option').length > 1", timeout=2000)
     except Exception:
@@ -305,7 +286,7 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
 
     nombre = await page.input_value("#nombreCompleto") or "CIUDADANO REGISTRADO"
 
-    # 7. Agregar documento
+    # 6. Agregar documento
     await page.locator('input[value="+ Agregar un nuevo documento"]').click(force=True)
     await page.wait_for_timeout(200)
 
@@ -384,28 +365,54 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
             if (btn) btn.click();
         """)
 
-    await page.wait_for_timeout(400)
-
-    # 8. Enviar Captcha
-    await page.fill("#captchaTxt", valid_captcha_code)
-    await page.evaluate("""
-        const btn = document.querySelector('#frmIngresoFormulario input[value="Aceptar"]') || document.getElementById('j_idt170') || document.getElementById('j_idt155');
-        if (btn) btn.click();
-    """)
-
-    # 9. Esperar confirmación modal (instantánea en ~50-100ms)
+    # Esperar confirmación de fila en la tabla judicial
     try:
-        await page.wait_for_function("""
-            () => {
-                const c = document.getElementById('frmPopups:confirmForm_container');
-                const s = document.getElementById('frmPopups:confirmForm_shade');
-                return (c && c.style.display !== 'none' && c.style.visibility !== 'hidden') || (s && s.style.display !== 'none');
-            }
-        """, timeout=2500)
+        await page.wait_for_function(f"() => document.body.innerText.includes('{cedula}')", timeout=3000)
     except Exception:
-        pass
+        await page.wait_for_timeout(500)
 
-    # 10. Confirmar "Si"
+    # 7. Ciclo de resolución y validación ultra-rápida del Captcha en la misma página
+    c_el = await page.wait_for_selector("#imgCaptchaId", state="visible", timeout=6000)
+    captcha_solved = False
+
+    for _ in range(5):
+        c_bytes = await c_el.screenshot()
+        code = await solve_winocr_strict(c_bytes)
+
+        if len(code) == 6:
+            await page.fill("#captchaTxt", code)
+            await page.evaluate("""
+                const btn = document.querySelector('#frmIngresoFormulario input[value="Aceptar"]') || document.getElementById('j_idt170') || document.getElementById('j_idt155');
+                if (btn) btn.click();
+            """)
+
+            # Comprobar si apareció el modal de confirmación en ~50ms
+            try:
+                modal_ok = await page.wait_for_function("""
+                    () => {
+                        const c = document.getElementById('frmPopups:confirmForm_container');
+                        const s = document.getElementById('frmPopups:confirmForm_shade');
+                        return (c && c.style.display !== 'none' && c.style.visibility !== 'hidden') || (s && s.style.display !== 'none');
+                    }
+                """, timeout=2500)
+                if modal_ok:
+                    captcha_solved = True
+                    break
+            except Exception:
+                pass
+
+        # Refrescar solo la imagen del captcha si no fue aceptado
+        refresh_btn = await page.query_selector("a:has(img[src*='refresh']), #imgCaptchaId + a")
+        if refresh_btn:
+            await refresh_btn.click()
+        else:
+            await page.evaluate("document.getElementById('imgCaptchaId').src = '../captchaRegistro.jpg?' + Math.random();")
+        await page.wait_for_timeout(350)
+
+    if not captcha_solved:
+        return None, None
+
+    # 8. Confirmar "Si"
     await page.evaluate("""
         if (window.si) {
             window.si();
