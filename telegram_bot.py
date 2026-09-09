@@ -17,8 +17,6 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 from text_cleaner import limpiar_y_corregir_sector
-from ant_orden_pago import detectar_mensaje_ant, parsear_mensaje_ant, procesar_orden_pago_ant
-from ant_handlers import handle_message_ant
 from record_policial import detectar_mensaje_record, parsear_mensaje_record
 from record_handlers import handle_message_record
 from bachiller import detectar_mensaje_bachiller, parsear_mensaje_bachiller
@@ -497,11 +495,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ **Denuncias de Extravío (Judicatura):**\n"
         "• *Cédula:* `1708927502 Sector El Recreo`\n"
         "• *Licencia:* `1708927502 Solanda tipo B`\n\n"
-        "2️⃣ **Orden de Pago de Licencia (ANT):**\n"
-        "• *Ejemplo:* `orden de pago renovacion 1708927502 tipo B`\n\n"
-        "3️⃣ **Récord Policial (Ministerio del Interior):**\n"
+        "2️⃣ **Récord Policial (Ministerio del Interior):**\n"
         "• *Ejemplo:* `record policial 1708927502`\n\n"
-        "4️⃣ **Certificado de Bachiller (Ministerio de Educación):**\n"
+        "3️⃣ **Certificado de Bachiller (Ministerio de Educación):**\n"
         "• *Ejemplo:* `bachiller 1753445285`\n"
         "• *O:* `titulo de bachiller 1753445285`\n\n"
         "🔄 **Comandos:**\n"
@@ -537,10 +533,6 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
-
-    # Revisa si es flujo ANT
-    if detectar_mensaje_ant(text) or user_states.get(user_id, {}).get("flujo") == "ant":
-        return await handle_message_ant(update, context, user_states)
         
     # Revisa si es flujo Record Policial
     if detectar_mensaje_record(text) or user_states.get(user_id, {}).get("flujo") == "record":
