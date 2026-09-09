@@ -21,6 +21,8 @@ from ant_orden_pago import detectar_mensaje_ant, parsear_mensaje_ant, procesar_o
 from ant_handlers import handle_message_ant
 from record_policial import detectar_mensaje_record, parsear_mensaje_record
 from record_handlers import handle_message_record
+from bachiller import detectar_mensaje_bachiller, parsear_mensaje_bachiller
+from bachiller_handlers import handle_message_bachiller
 
 try:
     import ddddocr
@@ -499,6 +501,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• *Ejemplo:* `orden de pago renovacion 1708927502 tipo B`\n\n"
         "3️⃣ **Récord Policial (Ministerio del Interior):**\n"
         "• *Ejemplo:* `record policial 1708927502`\n\n"
+        "4️⃣ **Certificado de Bachiller (Ministerio de Educación):**\n"
+        "• *Ejemplo:* `bachiller 1753445285`\n"
+        "• *O:* `titulo de bachiller 1753445285`\n\n"
         "🔄 **Comandos:**\n"
         "• `/actualizar` — Descarga actualizaciones de GitHub y reinicia el bot automáticamente."
     )
@@ -513,6 +518,10 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Asegurar que todas las librerías necesarias estén instaladas
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"], capture_output=True)
+        try:
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], capture_output=True)
+        except Exception:
+            pass
         try:
             subprocess.run([sys.executable, "-m", "patchright", "install", "chromium"], capture_output=True)
         except Exception:
@@ -546,6 +555,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_states[user_id]
             
         return await handle_message_record(update, context, cedula)
+
+    # Revisa si es flujo Bachiller (Ministerio de Educación)
+    if detectar_mensaje_bachiller(text) or user_states.get(user_id, {}).get("flujo") == "bachiller":
+        cedula = parsear_mensaje_bachiller(text) or user_states.get(user_id, {}).get("cedula")
+        
+        if not cedula:
+            user_states[user_id] = {"flujo": "bachiller"}
+            await update.message.reply_text("Para consultar el **Título de Bachiller**, por favor indícame el número de **cédula** (10 dígitos).", parse_mode="Markdown")
+            return
+            
+        if user_id in user_states:
+            del user_states[user_id]
+            
+        return await handle_message_bachiller(update, context, cedula)
 
     # Parsear el mensaje inteligentemente
     parsed = parsear_mensaje(text)
