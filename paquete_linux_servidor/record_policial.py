@@ -27,7 +27,9 @@ URL_RECORD = "https://certificados.ministeriodelinterior.gob.ec/gestorcertificad
 PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".browser_profile")
 
 KEYWORDS_RECORD = [
-    "record", "récord", "record policial", "récord policial", "antecedentes", "certificado de antecedentes"
+    "record", "récord", "record policial", "récord policial", "recor", "recort",
+    "recor policial", "recort policial", "antecedentes", "antecedente",
+    "certificado de antecedentes", "certificado antecedentes"
 ]
 
 def detectar_mensaje_record(texto: str) -> bool:
