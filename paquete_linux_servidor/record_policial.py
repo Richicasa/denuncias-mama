@@ -77,13 +77,19 @@ async def simular_click_humano(page, element) -> None:
     
     await element.click(delay=120)
 
+EXT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "nopecha_extension"))
+
 async def procesar_record_policial(cedula: str) -> tuple:
     """
     Genera el Certificado de Antecedentes Penales (Record Policial).
-    Utiliza perfil persistente y patchright con emulación de click humano para bypass de hCaptcha/Imperva.
+    Utiliza extensión de navegador (NopeCHA) y patchright con emulación de click humano para bypass de hCaptcha/Imperva.
     Retorna: (success: bool, pdf_bytes_or_error: bytes|str, nombre: str|None)
     """
-    os.makedirs(PROFILE_DIR, exist_ok=True)
+    import base64
+    import tempfile
+    import shutil
+    
+    temp_profile = tempfile.mkdtemp(prefix="rec_pol_")
     
     ua = (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -91,30 +97,46 @@ async def procesar_record_policial(cedula: str) -> tuple:
         else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     )
 
+    args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--start-maximized'
+    ]
+    if os.path.exists(EXT_PATH):
+        args.insert(0, f'--disable-extensions-except={EXT_PATH}')
+        args.insert(1, f'--load-extension={EXT_PATH}')
+
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
-            user_data_dir=PROFILE_DIR,
+            user_data_dir=temp_profile,
             headless=False,
             viewport={"width": 1920, "height": 1080},
             user_agent=ua,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--start-maximized'
-            ],
+            args=args,
             locale="es-EC"
         )
         page = context.pages[0] if context.pages else await context.new_page()
 
         try:
             # 1. Cargar portal
+            print("[RECORD] 1. Cargando portal del Ministerio del Interior...")
             await page.goto(URL_RECORD, wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(3000)
 
-            # 2. Detectar y resolver hCaptcha de Imperva con click humano
-            for _ in range(8):
+            # Verificar si existe bloqueo previo de Imperva
+            try:
+                body_txt = await page.inner_text("body")
+                if "Error 17" in body_txt or "Incident ID" in body_txt:
+                    await context.close()
+                    return False, "Bloqueo temporal de seguridad de Imperva (Error 17). Espera 5-10 minutos antes de intentar de nuevo.", None
+            except Exception:
+                pass
+
+            # 2. Detectar y resolver hCaptcha (checkbox con trayectoria humana + extensión activa)
+            print("[RECORD] 2. Buscando checkbox hCaptcha...")
+            for _ in range(12):
                 h_frame = None
                 for frame in page.frames:
                     if "hcaptcha.html" in frame.url and "frame=checkbox" in frame.url:
@@ -126,36 +148,48 @@ async def procesar_record_policial(cedula: str) -> tuple:
                     if await cb.is_visible():
                         print("[RECORD] Checkbox hCaptcha detectado. Ejecutando click humano...")
                         await simular_click_humano(page, cb)
-                        await page.wait_for_timeout(4000)
                         break
                 await asyncio.sleep(1)
 
-            # 3. Descartar banner de política de privacidad si estorba
-            try:
-                cookie_btn = await page.query_selector("button:has-text('Aceptar!'), .politica-cookies button")
-                if cookie_btn and await cookie_btn.is_visible():
-                    await cookie_btn.click()
-                    await asyncio.sleep(0.5)
-            except Exception:
-                pass
-
-            # 4. Aceptar Términos y Condiciones
-            for _ in range(6):
-                accepted = await page.evaluate("""
-                    () => {
-                        const btns = Array.from(document.querySelectorAll('.ui-dialog button, button'));
-                        const b = btns.find(x => x.innerText.trim().toLowerCase() === 'aceptar');
-                        if (b) { b.click(); return true; }
-                        return false;
-                    }
-                """)
-                if accepted:
-                    break
+            # 3. Monitorear resolución (directa o interactiva con extensión) y aceptar Términos
+            print("[RECORD] 3. Esperando resolución de captcha y Términos...")
+            for sec in range(1, 35):
                 await asyncio.sleep(1)
+                
+                # Descartar banner de cookies si estorba
+                try:
+                    cookie_btn = await page.query_selector("button:has-text('Aceptar!'), .politica-cookies button")
+                    if cookie_btn and await cookie_btn.is_visible():
+                        await cookie_btn.click()
+                except Exception:
+                    pass
+
+                # Intentar aceptar Términos y Condiciones
+                try:
+                    accepted = await page.evaluate("""
+                        () => {
+                            const btns = Array.from(document.querySelectorAll('.ui-dialog button, button'));
+                            const b = btns.find(x => x.innerText.trim().toLowerCase() === 'aceptar');
+                            if (b && b.offsetParent !== null) { b.click(); return true; }
+                            return false;
+                        }
+                    """)
+                    if accepted:
+                        print(f"[RECORD] Términos aceptados en {sec}s")
+                        break
+                except Exception:
+                    pass
+
+                # Verificar si ya se abrió el formulario
+                try:
+                    if await page.locator("#txtCi").is_visible():
+                        break
+                except Exception:
+                    pass
 
             await page.wait_for_timeout(1000)
 
-            # 5. Esperar formulario y llenar cédula
+            # 4. Esperar formulario y llenar cédula
             try:
                 await page.wait_for_selector("#txtCi", state="visible", timeout=15000)
             except Exception:
@@ -172,13 +206,14 @@ async def procesar_record_policial(cedula: str) -> tuple:
                     return False, "Bloqueo temporal de seguridad de Imperva (Error 17). Espera 5-10 minutos antes de intentar de nuevo.", None
                 return False, "No se pudo cargar el formulario del Ministerio (filtro de seguridad activo). Intenta de nuevo.", None
 
+            print(f"[RECORD] 4. Llenando cédula {cedula}...")
             await page.fill("#txtCi", cedula)
             await asyncio.sleep(0.4)
             await page.click("#btnSig1")
 
-            # 6. Esperar paso de motivo de consulta
+            # 5. Esperar paso de motivo de consulta (dar tiempo al web service de Registro Civil)
             try:
-                await page.wait_for_selector("#txtMotivo", state="visible", timeout=15000)
+                await page.wait_for_selector("#txtMotivo", state="visible", timeout=25000)
             except Exception:
                 body_text = await page.inner_text("body")
                 for err_kw in ["no se encuentra", "no existe", "incorrecta", "error"]:
@@ -190,7 +225,7 @@ async def procesar_record_policial(cedula: str) -> tuple:
                 except Exception:
                     pass
                 await context.close()
-                return False, "El portal no devolvió datos para esta cédula.", None
+                return False, "El portal no devolvió datos para esta cédula (posible demora del Registro Civil).", None
 
             # Extraer nombre si está disponible
             nombre = None
@@ -202,6 +237,7 @@ async def procesar_record_policial(cedula: str) -> tuple:
                 pass
 
             # Llenar motivo y enviar paso 2
+            print("[RECORD] 5. Llenando motivo y generando certificado...")
             await page.fill("#txtMotivo", "realizar un tramite")
             await asyncio.sleep(0.4)
             await page.click("#btnSig2")
@@ -210,12 +246,12 @@ async def procesar_record_policial(cedula: str) -> tuple:
             try:
                 await page.wait_for_function(
                     "() => { const el = document.getElementById('hdIdr'); return el && el.value && el.value.trim().length > 0; }",
-                    timeout=10000
+                    timeout=15000
                 )
             except Exception:
                 await page.wait_for_timeout(3500)
 
-            # 7. Generar URL directa del certificado PDF con el token de sesión
+            # 6. Generar URL directa del certificado PDF con el token de sesión
             cert_url = await page.evaluate("""
                 () => {
                     const idr = document.getElementById('hdIdr') ? document.getElementById('hdIdr').value : '';
@@ -229,11 +265,29 @@ async def procesar_record_policial(cedula: str) -> tuple:
                 await context.close()
                 return False, "No se pudo generar el código del certificado.", None
 
-            # Descargar PDF directamente con la sesión activa
-            resp = await page.request.get(cert_url)
-            body = await resp.body()
-            print(f"[RECORD] HTTP {resp.status}, len={len(body)}, is_pdf={body.startswith(b'%PDF') if body else False}")
+            # 7. Descargar PDF vía in-page fetch (utiliza la sesión autenticada del navegador)
+            body = None
+            try:
+                pdf_b64 = await page.evaluate("""
+                    async (url) => {
+                        const resp = await fetch(url);
+                        const blob = await resp.blob();
+                        return new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                            reader.onerror = reject;
+                            reader.readAsDataURL(blob);
+                        });
+                    }
+                """, cert_url)
+                if pdf_b64:
+                    body = base64.b64decode(pdf_b64)
+            except Exception as e:
+                print(f"[RECORD] Fallback a request.get por: {e}")
+                resp = await page.request.get(cert_url)
+                body = await resp.body()
 
+            print(f"[RECORD] len={len(body) if body else 0}, is_pdf={body.startswith(b'%PDF') if body else False}")
             await context.close()
 
             if body and body.startswith(b"%PDF") and len(body) > 5000:
@@ -254,3 +308,8 @@ async def procesar_record_policial(cedula: str) -> tuple:
             except Exception:
                 pass
             return False, f"Error en procesamiento: {str(e)}", None
+        finally:
+            try:
+                shutil.rmtree(temp_profile, ignore_errors=True)
+            except Exception:
+                pass

@@ -24,8 +24,8 @@ async def handle_message_record(update: Update, context: ContextTypes.DEFAULT_TY
         success, data, nombre = await procesar_record_policial(cedula)
         if success:
             break
-        # Si el error es de Incapsula (WAF), no reintentamos
-        if not success and isinstance(data, str) and "Incapsula" in data:
+        # Si el error es de Incapsula / Imperva (WAF), no reintentamos para no quemar la IP
+        if not success and isinstance(data, str) and any(kw in data for kw in ["Incapsula", "Imperva", "Error 17", "Incident ID"]):
             break
             
         if i < intentos - 1:
