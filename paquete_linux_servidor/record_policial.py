@@ -42,19 +42,16 @@ def parsear_mensaje_record(texto: str) -> str | None:
         return m.group(1)
     return None
 
-async def simular_click_humano(page, iframe_selector: str, element) -> None:
+async def simular_click_humano(page, element) -> None:
     """
     Simula una trayectoria de mouse natural hacia el checkbox con aceleración
     y micro-pausas antes de presionar para evitar que hCaptcha detecte un bot.
     """
     try:
-        iframe_elem = await page.query_selector(iframe_selector)
-        ibox = await iframe_elem.bounding_box() if iframe_elem else None
         cbox = await element.bounding_box()
-        
-        if ibox and cbox:
-            abs_x = ibox["x"] + cbox["x"] + cbox["width"] * random.uniform(0.4, 0.6)
-            abs_y = ibox["y"] + cbox["y"] + cbox["height"] * random.uniform(0.4, 0.6)
+        if cbox:
+            abs_x = cbox["x"] + cbox["width"] * random.uniform(0.4, 0.6)
+            abs_y = cbox["y"] + cbox["height"] * random.uniform(0.4, 0.6)
             
             start_x = random.randint(80, 250)
             start_y = random.randint(80, 250)
@@ -78,7 +75,7 @@ async def simular_click_humano(page, iframe_selector: str, element) -> None:
     except Exception as e:
         print(f"[RECORD] Detalle en simular_click_humano: {e}")
     
-    await element.click()
+    await element.click(delay=120)
 
 async def procesar_record_policial(cedula: str) -> tuple:
     """
@@ -88,15 +85,24 @@ async def procesar_record_policial(cedula: str) -> tuple:
     """
     os.makedirs(PROFILE_DIR, exist_ok=True)
     
+    ua = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        if sys.platform != "win32"
+        else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    )
+
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
             user_data_dir=PROFILE_DIR,
             headless=False,
+            viewport={"width": 1920, "height": 1080},
+            user_agent=ua,
             args=[
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled'
+                '--disable-blink-features=AutomationControlled',
+                '--start-maximized'
             ],
             locale="es-EC"
         )
@@ -119,7 +125,7 @@ async def procesar_record_policial(cedula: str) -> tuple:
                     cb = h_frame.locator("#checkbox")
                     if await cb.is_visible():
                         print("[RECORD] Checkbox hCaptcha detectado. Ejecutando click humano...")
-                        await simular_click_humano(page, "iframe[src*='frame=checkbox']", cb)
+                        await simular_click_humano(page, cb)
                         await page.wait_for_timeout(4000)
                         break
                 await asyncio.sleep(1)
