@@ -102,6 +102,12 @@ async def procesar_record_policial(cedula: str) -> tuple:
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-infobars',
+        '--disable-notifications',
+        '--disable-popup-blocking',
+        '--silent-debugger-extension-api',
         '--start-maximized'
     ]
     if os.path.exists(EXT_PATH):
