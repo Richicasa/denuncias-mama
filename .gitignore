@@ -5,5 +5,7 @@ downloads/
 .env
 .browser_profile/
 *.png
+!nopecha_extension/icon/*.png
+!paquete_linux_servidor/nopecha_extension/icon/*.png
 *.pdf
 test_*.py
