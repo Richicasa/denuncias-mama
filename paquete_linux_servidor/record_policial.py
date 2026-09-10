@@ -57,19 +57,19 @@ async def simular_click_humano(page, element) -> None:
             start_y = random.randint(80, 250)
             await page.mouse.move(start_x, start_y)
             
-            steps = 22
+            steps = 16
             for i in range(1, steps + 1):
                 prog = i / steps
                 ease = 1 - (1 - prog) ** 3  # cubic ease out
-                curr_x = start_x + (abs_x - start_x) * ease + random.uniform(-1.5, 1.5)
-                curr_y = start_y + (abs_y - start_y) * ease + random.uniform(-1.5, 1.5)
+                curr_x = start_x + (abs_x - start_x) * ease + random.uniform(-1.2, 1.2)
+                curr_y = start_y + (abs_y - start_y) * ease + random.uniform(-1.2, 1.2)
                 await page.mouse.move(curr_x, curr_y)
-                await asyncio.sleep(random.uniform(0.012, 0.022))
+                await asyncio.sleep(random.uniform(0.009, 0.016))
             
             await page.mouse.move(abs_x, abs_y)
-            await asyncio.sleep(random.uniform(0.18, 0.35))
+            await asyncio.sleep(random.uniform(0.14, 0.22))
             await page.mouse.down()
-            await asyncio.sleep(random.uniform(0.08, 0.12))
+            await asyncio.sleep(random.uniform(0.07, 0.11))
             await page.mouse.up()
             return
     except Exception as e:
@@ -129,20 +129,26 @@ async def procesar_record_policial(cedula: str) -> tuple:
             # 1. Cargar portal
             print("[RECORD] 1. Cargando portal del Ministerio del Interior...")
             await page.goto(URL_RECORD, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(1800)
 
             # Verificar si existe bloqueo previo de Imperva
             try:
                 body_txt = await page.inner_text("body")
-                if "Error 17" in body_txt or "Incident ID" in body_txt:
+                has_imp_block = "Error 17" in body_txt or "Incident ID" in body_txt
+                if not has_imp_block:
+                    for f in page.frames:
+                        if "edet=17" in f.url or "incident_id" in f.url.lower():
+                            has_imp_block = True
+                            break
+                if has_imp_block:
                     await context.close()
-                    return False, "Bloqueo temporal de seguridad de Imperva (Error 17). Espera 5-10 minutos antes de intentar de nuevo.", None
+                    return False, "Bloqueo temporal de seguridad de Imperva (Error 17). El portal del Ministerio limitó temporalmente las consultas consecutivas en esta IP. Espera 2-3 minutos.", None
             except Exception:
                 pass
 
-            # 2. Detectar y resolver hCaptcha (checkbox con trayectoria humana + extensión activa)
+            # 2. Detectar y resolver hCaptcha (sondeo reactivo de 400ms)
             print("[RECORD] 2. Buscando checkbox hCaptcha...")
-            for _ in range(12):
+            for _ in range(25):
                 h_frame = None
                 for frame in page.frames:
                     if "hcaptcha.html" in frame.url and "frame=checkbox" in frame.url:
@@ -155,12 +161,13 @@ async def procesar_record_policial(cedula: str) -> tuple:
                         print("[RECORD] Checkbox hCaptcha detectado. Ejecutando click humano...")
                         await simular_click_humano(page, cb)
                         break
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.4)
 
             # 3. Monitorear resolución (directa o interactiva con extensión) y aceptar Términos
             print("[RECORD] 3. Esperando resolución de captcha y Términos...")
-            for sec in range(1, 35):
-                await asyncio.sleep(1)
+            t_solve_start = time.perf_counter()
+            for _ in range(75):
+                await asyncio.sleep(0.4)
                 
                 # Descartar banner de cookies si estorba
                 try:
@@ -181,7 +188,7 @@ async def procesar_record_policial(cedula: str) -> tuple:
                         }
                     """)
                     if accepted:
-                        print(f"[RECORD] Términos aceptados en {sec}s")
+                        print(f"[RECORD] Términos aceptados en {time.perf_counter() - t_solve_start:.1f}s")
                         break
                 except Exception:
                     pass
@@ -192,8 +199,6 @@ async def procesar_record_policial(cedula: str) -> tuple:
                         break
                 except Exception:
                     pass
-
-            await page.wait_for_timeout(1000)
 
             # 4. Esperar formulario y llenar cédula
             try:
@@ -214,7 +219,7 @@ async def procesar_record_policial(cedula: str) -> tuple:
 
             print(f"[RECORD] 4. Llenando cédula {cedula}...")
             await page.fill("#txtCi", cedula)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.15)
             await page.click("#btnSig1")
 
             # 5. Esperar paso de motivo de consulta (dar tiempo al web service de Registro Civil)
@@ -245,7 +250,7 @@ async def procesar_record_policial(cedula: str) -> tuple:
             # Llenar motivo y enviar paso 2
             print("[RECORD] 5. Llenando motivo y generando certificado...")
             await page.fill("#txtMotivo", "realizar un tramite")
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.15)
             await page.click("#btnSig2")
             
             # Esperar a que el AJAX del ministerio complete y llene hdIdr
