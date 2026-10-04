@@ -30,7 +30,8 @@ def test_parsear_mensaje_ant_completo():
     assert res["id_servicio"] == 5
     assert res["servicio_nombre"] == "PRIMERA VEZ"
     assert res["tipo_licencia"] == "B"
-    assert res["es_valido"] is True
+    assert res["es_completo"] is True
+    assert res["datos_faltantes"] == []
 
 def test_parsear_mensaje_ant_duplicado():
     res = parsear_mensaje_ant("orden de pago 0925483927 duplicado tipo C")
@@ -38,24 +39,48 @@ def test_parsear_mensaje_ant_duplicado():
     assert res["id_servicio"] == 1004
     assert res["servicio_nombre"] == "DUPLICADO"
     assert res["tipo_licencia"] == "C"
-    assert res["es_valido"] is True
+    assert res["es_completo"] is True
+    assert res["datos_faltantes"] == []
 
-def test_parsear_mensaje_ant_default_renovacion():
-    res = parsear_mensaje_ant("orden de pago 0925483927 tipo A")
+def test_parsear_mensaje_ant_renovacion_completa():
+    res = parsear_mensaje_ant("orden de pago 0925483927 tipo A renovacion")
     assert res["cedula"] == "0925483927"
     assert res["id_servicio"] == 1
     assert res["servicio_nombre"] == "RENOVACION"
     assert res["tipo_licencia"] == "A"
-    assert res["es_valido"] is True
+    assert res["es_completo"] is True
+    assert res["datos_faltantes"] == []
 
-def test_parsear_mensaje_ant_sin_tipo():
+def test_parsear_mensaje_ant_falta_servicio_y_tipo():
+    # Solo envía la cédula y la frase orden de pago
     res = parsear_mensaje_ant("orden de pago 1710034065")
     assert res["cedula"] == "1710034065"
+    assert res["id_servicio"] is None
+    assert res["tipo_licencia"] is None
+    assert res["es_completo"] is False
+    assert "tipo_tramite" in res["datos_faltantes"]
+    assert "tipo_licencia" in res["datos_faltantes"]
+
+def test_parsear_mensaje_ant_falta_cedula():
+    # Envía tipo y servicio pero sin cédula
+    res = parsear_mensaje_ant("orden de pago tipo B primera vez")
+    assert res["cedula"] is None
+    assert res["id_servicio"] == 5
+    assert res["tipo_licencia"] == "B"
+    assert res["es_completo"] is False
+    assert res["datos_faltantes"] == ["cedula"]
+
+def test_parsear_mensaje_ant_falta_tipo():
+    # Envía cédula y renovación pero no el tipo de licencia
+    res = parsear_mensaje_ant("orden de pago 1710034065 renovacion")
+    assert res["cedula"] == "1710034065"
     assert res["id_servicio"] == 1
-    assert res["tipo_licencia"] == "B"  # Default a B (la más común)
-    assert res["es_valido"] is True
+    assert res["tipo_licencia"] is None
+    assert res["es_completo"] is False
+    assert res["datos_faltantes"] == ["tipo_licencia"]
 
 def test_parsear_mensaje_ant_cedula_invalida():
-    res = parsear_mensaje_ant("orden de pago 1234567890 tipo A")
-    assert res["es_valido"] is False
+    res = parsear_mensaje_ant("orden de pago 1234567890 tipo A renovacion")
+    assert res["es_completo"] is False
+    assert "cedula" in res["datos_faltantes"]
     assert "inválida" in res["error"].lower()

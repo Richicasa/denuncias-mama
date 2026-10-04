@@ -69,73 +69,76 @@ def parsear_mensaje_ant(texto: str) -> dict:
     """
     Parsea un mensaje natural tipo:
     '1728970128, orden de pago, tipo A, primera vez'
-    o variaciones, extrayendo:
-    - cedula (10 dígitos)
+    o variaciones, extrayendo de forma precisa:
+    - cedula (10 dígitos validados)
     - id_servicio (1: RENOVACIÓN, 5: PRIMERA VEZ, 1004: DUPLICADO)
-    - servicio_nombre
     - tipo_licencia (A, B, C, D, E, F, G)
-    - es_valido (bool)
-    - error (mensaje descriptivo si no es válido)
+    - datos_faltantes: lista de campos que no fueron proporcionados
+    - es_completo: bool (True si no falta ningún dato)
+    - error: mensaje explicativo si hay algún dato erróneo
     """
     if not texto:
-        return {"es_valido": False, "error": "Mensaje vacío"}
+        return {
+            "cedula": None,
+            "id_servicio": None,
+            "servicio_nombre": None,
+            "tipo_licencia": None,
+            "datos_faltantes": ["cedula", "tipo_tramite", "tipo_licencia"],
+            "es_completo": False,
+            "error": "Mensaje vacío"
+        }
 
     norm = _normalizar_texto(texto)
+    datos_faltantes = []
+    error = None
 
     # 1. Extraer cédula (primer bloque de 10 dígitos)
     match_cedula = re.search(r'\b(\d{10})\b', texto)
     cedula = match_cedula.group(1) if match_cedula else None
 
     if not cedula:
-        return {
-            "cedula": None,
-            "id_servicio": 1,
-            "servicio_nombre": "RENOVACION",
-            "tipo_licencia": None,
-            "es_valido": False,
-            "error": "No se encontró un número de cédula de 10 dígitos en el mensaje."
-        }
+        datos_faltantes.append("cedula")
+    elif not validar_cedula_ec(cedula):
+        datos_faltantes.append("cedula")
+        error = f"La cédula {cedula} es inválida según el registro civil ecuatoriano."
 
-    if not validar_cedula_ec(cedula):
-        return {
-            "cedula": cedula,
-            "id_servicio": 1,
-            "servicio_nombre": "RENOVACION",
-            "tipo_licencia": None,
-            "es_valido": False,
-            "error": f"La cédula {cedula} es inválida según el registro civil ecuatoriano."
-        }
-
-    # 2. Extraer tipo de servicio
+    # 2. Extraer tipo de servicio (si se menciona explícitamente)
+    id_servicio = None
+    servicio_nombre = None
     if re.search(r'primer[ao]|1ra\s*vez|primera\s*vez|emision', norm):
         id_servicio = 5
         servicio_nombre = "PRIMERA VEZ"
     elif re.search(r'duplicad[oa]|copia', norm):
         id_servicio = 1004
         servicio_nombre = "DUPLICADO"
-    else:
-        # Por defecto renovación (o si menciona renovacion/renovar)
+    elif re.search(r'renovaci|renovar', norm):
         id_servicio = 1
         servicio_nombre = "RENOVACION"
+    else:
+        datos_faltantes.append("tipo_tramite")
 
     # 3. Extraer tipo de licencia (A, B, C, D, E, F, G)
+    tipo_licencia = None
     match_tipo = re.search(r'tipo\s*([a-g])\b', norm)
     if match_tipo:
         tipo_licencia = match_tipo.group(1).upper()
     else:
-        # Buscar letra aislada si no tiene la palabra "tipo"
-        match_aislado = re.search(r'\b([a-g])\b', norm)
-        # Asegurarnos de que no sea la 'a' de 'orden de pago tipo a' que ya capturó, o 'a' como preposición
-        if match_aislado and match_aislado.group(1) in ['b', 'c', 'd', 'e', 'f', 'g']:
+        # Buscar letra aislada si es B-G (excluyendo 'a' sola que suele ser preposición)
+        # o 'a' si está cerca de 'licencia'
+        match_aislado = re.search(r'\b([b-g])\b', norm)
+        if match_aislado:
             tipo_licencia = match_aislado.group(1).upper()
+        elif re.search(r'\blicencia\s+([a-g])\b', norm):
+            tipo_licencia = re.search(r'\blicencia\s+([a-g])\b', norm).group(1).upper()
         else:
-            tipo_licencia = "B"  # Default a B (tipo no profesional estándar)
+            datos_faltantes.append("tipo_licencia")
 
     return {
         "cedula": cedula,
         "id_servicio": id_servicio,
         "servicio_nombre": servicio_nombre,
         "tipo_licencia": tipo_licencia,
-        "es_valido": True,
-        "error": None
+        "datos_faltantes": datos_faltantes,
+        "es_completo": len(datos_faltantes) == 0,
+        "error": error
     }
