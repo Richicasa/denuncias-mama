@@ -21,6 +21,8 @@ from record_policial import detectar_mensaje_record, parsear_mensaje_record
 from record_handlers import handle_message_record
 from bachiller import detectar_mensaje_bachiller, parsear_mensaje_bachiller
 from bachiller_handlers import handle_message_bachiller
+from ant_parser import detectar_mensaje_ant, parsear_mensaje_ant
+from ant_handlers import handle_message_ant
 
 try:
     import ddddocr
@@ -500,7 +502,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3️⃣ **Certificado de Bachiller (Ministerio de Educación):**\n"
         "• *Ejemplo:* `bachiller 1753445285`\n"
         "• *O:* `titulo de bachiller 1753445285`\n\n"
+        "4️⃣ **Orden de Pago de Licencias (ANT):**\n"
+        "• *Ejemplo:* `1728970128, orden de pago, tipo A, primera vez`\n"
+        "• *O:* `orden de pago 1710034065 renovacion`\n\n"
         "🔄 **Comandos:**\n"
+        "• `/orden_pago` — Iniciar consulta de orden de pago ANT.\n"
         "• `/actualizar` — Descarga actualizaciones de GitHub y reinicia el bot automáticamente."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -528,6 +534,18 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
         await msg.edit_text(f"❌ Error al actualizar: {e}")
+
+
+async def orden_pago_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_states[user_id] = {"flujo": "orden_pago"}
+    await update.message.reply_text(
+        "🚗 **Orden de Pago de Licencias ANT**\n\n"
+        "Puedes enviar todos los datos en un solo mensaje:\n"
+        "`1728970128, orden de pago, tipo A, primera vez`\n\n"
+        "O indícame el número de **cédula** (10 dígitos) para comenzar.",
+        parse_mode="Markdown"
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -561,6 +579,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_states[user_id]
             
         return await handle_message_bachiller(update, context, cedula)
+
+    # Revisa si es flujo Orden de Pago ANT (Licencias)
+    if detectar_mensaje_ant(text) or user_states.get(user_id, {}).get("flujo") == "orden_pago":
+        parsed_ant = parsear_mensaje_ant(text)
+        return await handle_message_ant(update, context, parsed_ant, user_states)
 
     # Parsear el mensaje inteligentemente
     parsed = parsear_mensaje(text)
@@ -756,6 +779,8 @@ def main():
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("actualizar", update_command))
+    app.add_handler(CommandHandler("orden_pago", orden_pago_command))
+    app.add_handler(CommandHandler("licencia", orden_pago_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
 
