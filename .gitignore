@@ -8,4 +8,5 @@ downloads/
 !nopecha_extension/icon/*.png
 !paquete_linux_servidor/nopecha_extension/icon/*.png
 *.pdf
-test_*.py
+/test_*.py
+!tests/
