@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 from telegram import Update, InputFile
@@ -120,11 +121,20 @@ async def handle_message_ant(
 
     try:
         client = ANTOrdenPagoClient()
-        res = await client.obtener_orden_pago_pdf(
-            cedula=cedula,
-            id_servicio=id_servicio,
-            tipo_licencia=tipo_licencia
-        )
+        try:
+            res = await asyncio.wait_for(
+                client.obtener_orden_pago_pdf(
+                    cedula=cedula,
+                    id_servicio=id_servicio,
+                    tipo_licencia=tipo_licencia
+                ),
+                timeout=50.0
+            )
+        except asyncio.TimeoutError:
+            res = {
+                "success": False,
+                "error_mensaje": "Tiempo de espera agotado al conectar con el portal de la ANT (50s)."
+            }
 
         if res.get("success"):
             pdf_bytes = res.get("pdf_bytes")

@@ -49,12 +49,50 @@ _browser_lock = asyncio.Lock()
 _global_playwright = None
 _global_browser = None
 
+MAX_RETRIES_DENUNCIA = 3
+TOTAL_TIMEOUT_DENUNCIA = 90  # segundos maximos por denuncia
+
+async def reset_shared_browser():
+    """Cierra limpiamente el navegador compartido y Playwright para reiniciar desde cero."""
+    global _global_playwright, _global_browser
+    async with _browser_lock:
+        if _global_browser is not None:
+            try:
+                await _global_browser.close()
+            except Exception:
+                pass
+            _global_browser = None
+        if _global_playwright is not None:
+            try:
+                await _global_playwright.stop()
+            except Exception:
+                pass
+            _global_playwright = None
+
 async def get_shared_browser():
     global _global_playwright, _global_browser
     async with _browser_lock:
-        if _global_browser is None or not _global_browser.is_connected():
-            if _global_playwright is None:
-                _global_playwright = await async_playwright().start()
+        browser_alive = False
+        if _global_browser is not None and _global_browser.is_connected():
+            browser_alive = True
+
+        if not browser_alive:
+            # Si el navegador previo falló o se desconectó, limpiar completamente
+            if _global_browser is not None:
+                try:
+                    await _global_browser.close()
+                except Exception:
+                    pass
+                _global_browser = None
+
+            if _global_playwright is not None:
+                try:
+                    await _global_playwright.stop()
+                except Exception:
+                    pass
+                _global_playwright = None
+
+            _global_playwright = await async_playwright().start()
             _global_browser = await _global_playwright.chromium.launch(
                 headless=True,
                 args=[
@@ -459,18 +497,21 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str, tipo_denuncia
     dir_circunstancia = sector_info["direccion_circunstancia"]
     sector_limpio = sector_info["sector_limpio"]
 
-    browser = await get_shared_browser()
-    context = await browser.new_context(
-        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        locale="es-EC"
-    )
-    page = await context.new_page()
-
+    context = None
     try:
-        captured_pdf, nombre = await _ejecutar_formulario(
-            page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia
+        browser = await asyncio.wait_for(get_shared_browser(), timeout=20.0)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="es-EC"
         )
-        await context.close()
+        page = await context.new_page()
+
+        captured_pdf, nombre = await asyncio.wait_for(
+            _ejecutar_formulario(
+                page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia
+            ),
+            timeout=45.0
+        )
 
         if captured_pdf and captured_pdf.startswith(b"%PDF") and len(captured_pdf) > 20000:
             return True, {
@@ -480,14 +521,24 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str, tipo_denuncia
                 "pdf_bytes": captured_pdf
             }, None
         else:
-            return False, "Reintentando emision...", None
+            return False, "El portal judicial no entregó el PDF.", None
 
+    except asyncio.TimeoutError:
+        return False, "Tiempo de espera agotado en el portal judicial (45s).", None
     except Exception as e:
-        try:
-            await context.close()
-        except Exception:
-            pass
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ["target closed", "browser has been closed", "connection closed", "crash"]):
+            try:
+                await reset_shared_browser()
+            except Exception:
+                pass
         return False, f"Error: {str(e)}", None
+    finally:
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -549,8 +600,12 @@ async def orden_pago_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    if not update or not update.message or not update.message.text:
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
     text = update.message.text.strip()
+    if not text:
+        return
         
     # Revisa si es flujo Record Policial
     if detectar_mensaje_record(text) or user_states.get(user_id, {}).get("flujo") == "record":
@@ -668,22 +723,25 @@ async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_de
         desc_tipo = f"Licencia tipo {tipo_licencia}" if tipo_licencia else "Licencia de conducir"
         emoji_doc = "🪪"
     else:
-        desc_tipo = "Cedula de Identidad"
+        desc_tipo = "Cédula de Identidad"
         emoji_doc = "🆔"
 
     msg_espera = await update.message.reply_text(
         f"⏳ **Generando denuncia oficial ante el Consejo de la Judicatura...**\n"
         f"{emoji_doc} Documento: `{desc_tipo}`\n"
-        f"🆔 Cedula: `{cedula}`\n"
+        f"🆔 Cédula: `{cedula}`\n"
         f"📍 Sector: `{sector}`\n\n"
         f"*Procesando, por favor espera...*",
         parse_mode="Markdown"
     )
 
-    intento = 1
     t0 = time.time()
+    ultimo_error = "No se pudo emitir el documento."
 
-    while True:
+    for intento in range(1, MAX_RETRIES_DENUNCIA + 1):
+        if time.time() - t0 > TOTAL_TIMEOUT_DENUNCIA:
+            break
+
         success, result, _ = await procesar_denuncia_judicial(cedula, sector, tipo_denuncia, tipo_licencia)
 
         if success:
@@ -694,9 +752,9 @@ async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_de
 
             if tipo_denuncia == "licencia":
                 caption = (
-                    f"✅ **DENUNCIA DE LICENCIA GENERADA CON EXITO!** ({elapsed:.1f}s)\n\n"
+                    f"✅ **DENUNCIA DE LICENCIA GENERADA CON ÉXITO!** ({elapsed:.1f}s)\n\n"
                     f"👤 **Nombre:** {nombre}\n"
-                    f"🆔 **Cedula:** `{cedula}`\n"
+                    f"🆔 **Cédula:** `{cedula}`\n"
                     f"🪪 **Documento:** {desc_tipo}\n"
                     f"📍 **Lugar:** {sector_fmt}\n\n"
                     f"📄 *Documento oficial emitido por el Consejo de la Judicatura.*"
@@ -704,11 +762,11 @@ async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_de
                 nombre_archivo = f"Denuncia_Licencia_{cedula}.pdf"
             else:
                 caption = (
-                    f"✅ **DENUNCIA GENERADA CON EXITO!** ({elapsed:.1f}s)\n\n"
+                    f"✅ **DENUNCIA GENERADA CON ÉXITO!** ({elapsed:.1f}s)\n\n"
                     f"👤 **Nombre:** {nombre}\n"
-                    f"🆔 **Cedula:** `{cedula}`\n"
+                    f"🆔 **Cédula:** `{cedula}`\n"
                     f"📍 **Lugar:** {sector_fmt}\n\n"
-                    f"📄 *Documento oficial emitido por el Consejo de la Judicatura (valido para tramites legales y Registro Civil).*"
+                    f"📄 *Documento oficial emitido por el Consejo de la Judicatura (válido para trámites legales y Registro Civil).*"
                 )
                 nombre_archivo = f"Denuncia_{cedula}.pdf"
 
@@ -726,21 +784,54 @@ async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_de
                 pass
             return
 
-        # No hubo PDF: reintentar silenciosamente
-        intento += 1
+        if isinstance(result, str):
+            ultimo_error = result
+
+        if intento < MAX_RETRIES_DENUNCIA:
+            try:
+                await msg_espera.edit_text(
+                    f"⏳ **Generando denuncia oficial ante el Consejo de la Judicatura...**\n"
+                    f"{emoji_doc} Documento: `{desc_tipo}`\n"
+                    f"🆔 Cédula: `{cedula}`\n"
+                    f"📍 Sector: `{sector}`\n\n"
+                    f"🔄 *Reintentando automáticamente (intento {intento + 1} de {MAX_RETRIES_DENUNCIA})...*",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+    # Si no se logró tras agotar los intentos:
+    tiempo_total = time.time() - t0
+    mensaje_fallo = (
+        f"❌ **No se pudo generar la denuncia en este momento.** ({tiempo_total:.1f}s)\n\n"
+        f"🆔 Cédula: `{cedula}`\n"
+        f"⚠️ **Motivo:** El portal del Consejo de la Judicatura no respondió a tiempo o presentó saturación.\n\n"
+        f"💡 **Recomendación:**\n"
+        f"• Verifica que el número de cédula `{cedula}` sea correcto.\n"
+        f"• Vuelve a enviar el mensaje en unos minutos.\n"
+        f"• O consulta otro trámite como Récord Policial, Bachiller o Licencia."
+    )
+    try:
+        await msg_espera.edit_text(mensaje_fallo, parse_mode="Markdown")
+    except Exception:
         try:
-            await msg_espera.edit_text(
-                f"⏳ **Generando denuncia oficial ante el Consejo de la Judicatura...**\n"
-                f"{emoji_doc} Documento: `{desc_tipo}`\n"
-                f"🆔 Cedula: `{cedula}`\n"
-                f"📍 Sector: `{sector}`\n\n"
-                f"🔄 *Reintentando automaticamente (intento {intento})...*",
+            await update.message.reply_text(mensaje_fallo, parse_mode="Markdown")
+        except Exception:
+            pass
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Manejador global de errores para asegurar que ninguna excepción no controlada detenga el bot."""
+    print(f"[ERROR GLOBAL] Excepción en actualización: {context.error}", flush=True)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Ocurrió un error inesperado al procesar la solicitud. Por favor intenta de nuevo en unos momentos.",
                 parse_mode="Markdown"
             )
         except Exception:
             pass
-
-        await asyncio.sleep(2)
 
 
 def main():
@@ -776,7 +867,14 @@ def main():
     print("Soporta denuncias de Cedula y de Licencia de conducir.", flush=True)
     print("====================================================================", flush=True)
 
-    app = ApplicationBuilder().token(token).build()
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .concurrent_updates(True)
+        .post_shutdown(lambda application: reset_shared_browser())
+        .build()
+    )
+    app.add_error_handler(global_error_handler)
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("actualizar", update_command))
     app.add_handler(CommandHandler("orden_pago", orden_pago_command))

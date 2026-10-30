@@ -21,7 +21,13 @@ async def handle_message_record(update: Update, context: ContextTypes.DEFAULT_TY
     intentos = 2
     success, data, nombre = False, None, None
     for i in range(intentos):
-        success, data, nombre = await procesar_record_policial(cedula)
+        try:
+            success, data, nombre = await asyncio.wait_for(procesar_record_policial(cedula), timeout=70.0)
+        except asyncio.TimeoutError:
+            success, data, nombre = False, "Tiempo de espera agotado al conectar con el Ministerio del Interior (70s).", None
+        except Exception as e:
+            success, data, nombre = False, f"Error de conexión: {str(e)}", None
+
         if success:
             break
         # Si el error es de Incapsula / Imperva (WAF), no reintentamos para no quemar la IP

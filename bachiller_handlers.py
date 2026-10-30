@@ -20,7 +20,13 @@ async def handle_message_bachiller(update: Update, context: ContextTypes.DEFAULT
     intentos = 2
     success, data = False, None
     for i in range(intentos):
-        success, data, _ = await procesar_certificado_bachiller(cedula)
+        try:
+            success, data, _ = await asyncio.wait_for(procesar_certificado_bachiller(cedula), timeout=55.0)
+        except asyncio.TimeoutError:
+            success, data = False, "Tiempo de espera agotado al consultar el Ministerio de Educación (55s)."
+        except Exception as e:
+            success, data = False, f"Error de conexión: {str(e)}"
+
         if success:
             break
             

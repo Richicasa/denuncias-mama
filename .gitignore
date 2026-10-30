@@ -10,3 +10,4 @@ downloads/
 *.pdf
 /test_*.py
 !tests/
+_backups/
