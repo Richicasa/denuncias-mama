@@ -40,6 +40,68 @@ def validar_cedula_ec(cedula: str) -> bool:
     digito_verificador = (10 - (suma % 10)) % 10
     return digito_verificador == int(cedula[9])
 
+
+def analizar_cedula_con_diagnostico(texto: str) -> dict:
+    """
+    Analiza el texto buscando la cédula ecuatoriana y diagnostica si está mal tipeada:
+    - Más de 10 dígitos (LONGITUD_MAYOR)
+    - Menos de 10 dígitos (LONGITUD_MENOR)
+    - Con letras o caracteres mezclados (CONTIENE_LETRAS)
+    - Con 10 dígitos pero dígito verificador incorrecto (MODULO10_INVALIDO)
+    - Válida (valida=True)
+    """
+    if not texto or not isinstance(texto, str):
+        return {"valida": False, "cedula": None, "error_tipo": None, "mensaje_error": None}
+
+    # 1. Candidatos de 10 dígitos
+    candidatos_10 = re.findall(r'\b\d{10}\b', texto)
+    if candidatos_10:
+        for cand in candidatos_10:
+            if validar_cedula_ec(cand):
+                return {"valida": True, "cedula": cand, "error_tipo": None, "mensaje_error": None}
+        cand = candidatos_10[0]
+        return {
+            "valida": False,
+            "cedula": cand,
+            "error_tipo": "MODULO10_INVALIDO",
+            "mensaje_error": f"⚠️ El número de cédula `{cand}` es una cédula ecuatoriana inválida (el dígito verificador o provincia no coincide). Por favor verifica que esté bien tipeada."
+        }
+
+    # 2. Palabras que parecen cédulas pero tienen letras mezcladas (longitud 9 a 12 con al menos 7 dígitos y letras)
+    tokens = re.findall(r'\b[A-Za-z0-9]+\b', texto)
+    for tok in tokens:
+        if 9 <= len(tok) <= 12 and sum(c.isdigit() for c in tok) >= 7 and any(c.isalpha() for c in tok):
+            return {
+                "valida": False,
+                "cedula": None,
+                "error_tipo": "CONTIENE_LETRAS",
+                "mensaje_error": f"⚠️ El número de cédula `{tok}` parece contener letras mezcladas. Las cédulas contienen únicamente 10 números. Revisa que no hayas presionado una letra por error (por ejemplo una 'O' en lugar de un '0')."
+            }
+
+    # 3. Números con más de 10 dígitos
+    largos = re.findall(r'\b\d{11,16}\b', texto)
+    if largos:
+        num_largo = largos[0]
+        return {
+            "valida": False,
+            "cedula": None,
+            "error_tipo": "LONGITUD_MAYOR",
+            "mensaje_error": f"⚠️ El número `{num_largo}` tiene {len(num_largo)} dígitos (más de 10). En Ecuador las cédulas tienen exactamente 10 dígitos. Parece que se te fue un número de más, por favor revisa que esté bien tipeado."
+        }
+
+    # 4. Números con 7 a 9 dígitos (cédulas incompletas)
+    cortos = re.findall(r'\b\d{7,9}\b', texto)
+    if cortos:
+        num_corto = cortos[0]
+        return {
+            "valida": False,
+            "cedula": None,
+            "error_tipo": "LONGITUD_MENOR",
+            "mensaje_error": f"⚠️ El número `{num_corto}` solo tiene {len(num_corto)} dígitos. En Ecuador las cédulas tienen exactamente 10 dígitos. Te faltan números, por favor verifica que esté completo y bien tipeado."
+        }
+
+    return {"valida": False, "cedula": None, "error_tipo": None, "mensaje_error": None}
+
 # Patrones para detectar intención de orden/comprobante de pago ANT
 _PATRONES_ORDEN_PAGO = [
     r'orden\s+d?e?\s*pago',          # orden de pago, orden pago, orden d pago
@@ -92,15 +154,18 @@ def parsear_mensaje_ant(texto: str) -> dict:
     datos_faltantes = []
     error = None
 
-    # 1. Extraer cédula (primer bloque de 10 dígitos)
-    match_cedula = re.search(r'\b(\d{10})\b', texto)
-    cedula = match_cedula.group(1) if match_cedula else None
-
-    if not cedula:
+    # 1. Extraer y diagnosticar cédula
+    diag_cedula = analizar_cedula_con_diagnostico(texto)
+    if diag_cedula["valida"]:
+        cedula = diag_cedula["cedula"]
+    else:
+        cedula = None
         datos_faltantes.append("cedula")
-    elif not validar_cedula_ec(cedula):
-        datos_faltantes.append("cedula")
-        error = f"La cédula {cedula} es inválida según el registro civil ecuatoriano."
+        if diag_cedula.get("mensaje_error"):
+            error = diag_cedula["mensaje_error"]
+        elif not diag_cedula.get("cedula"):
+            # No se detectó ningún número
+            pass
 
     # 2. Extraer tipo de servicio (si se menciona explícitamente)
     id_servicio = None

@@ -64,7 +64,10 @@ async def handle_message_ant(
         # Sección de datos que faltan
         lineas_faltantes = []
         if "cedula" in faltantes:
-            lineas_faltantes.append("• **Número de cédula:** 10 dígitos del titular.")
+            if parsed_data.get("error"):
+                lineas_faltantes.append(f"• **Cédula mal tipeada:** {parsed_data['error']}")
+            else:
+                lineas_faltantes.append("• **Número de cédula:** 10 dígitos del titular.")
         if "tipo_tramite" in faltantes:
             lineas_faltantes.append("• **Tipo de trámite:** ¿Es *Renovación*, *Primera vez* o *Duplicado*?")
         if "tipo_licencia" in faltantes:

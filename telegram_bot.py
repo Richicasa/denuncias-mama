@@ -21,7 +21,7 @@ from record_policial import detectar_mensaje_record, parsear_mensaje_record
 from record_handlers import handle_message_record
 from bachiller import detectar_mensaje_bachiller, parsear_mensaje_bachiller
 from bachiller_handlers import handle_message_bachiller
-from ant_parser import detectar_mensaje_ant, parsear_mensaje_ant
+from ant_parser import detectar_mensaje_ant, parsear_mensaje_ant, analizar_cedula_con_diagnostico
 from ant_handlers import handle_message_ant
 
 try:
@@ -49,8 +49,8 @@ _browser_lock = asyncio.Lock()
 _global_playwright = None
 _global_browser = None
 
-MAX_RETRIES_DENUNCIA = 3
-TOTAL_TIMEOUT_DENUNCIA = 90  # segundos maximos por denuncia
+MAX_RETRIES_DENUNCIA = 15
+TOTAL_TIMEOUT_DENUNCIA = 300  # segundos maximos para permitir las 15 pruebas
 
 async def reset_shared_browser():
     """Cierra limpiamente el navegador compartido y Playwright para reiniciar desde cero."""
@@ -184,9 +184,11 @@ def parsear_mensaje(texto: str) -> dict:
     """
     Parser inteligente: extrae cedula (10 digitos), sector y tipo_licencia
     del mensaje sin importar el orden. Detecta si es denuncia de cedula o licencia.
+    Diagnostica si la cedula esta mal tipeada (>10 digitos, letras, modulo 10).
     """
     resultado = {
         "cedula": None,
+        "error_cedula": None,
         "sector": None,
         "tipo_licencia": None,
         "tipo_denuncia": "cedula"  # "cedula" o "licencia"
@@ -200,10 +202,18 @@ def parsear_mensaje(texto: str) -> dict:
             resultado["tipo_denuncia"] = "licencia"
             break
 
-    # 2. Extraer cedula (10 digitos consecutivos)
-    cedula_match = re.search(r'\b(\d{10})\b', texto)
-    if cedula_match:
-        resultado["cedula"] = cedula_match.group(1)
+    # 2. Extraer y diagnosticar cedula
+    diag = analizar_cedula_con_diagnostico(texto)
+    if diag["valida"]:
+        resultado["cedula"] = diag["cedula"]
+    elif diag.get("mensaje_error"):
+        resultado["error_cedula"] = diag["mensaje_error"]
+        resultado["cedula"] = diag.get("cedula")
+    else:
+        # Fallback a busqueda de 10 digitos si la hubiera
+        cedula_match = re.search(r'\b(\d{10})\b', texto)
+        if cedula_match:
+            resultado["cedula"] = cedula_match.group(1)
 
     # 3. Extraer tipo de licencia (ej: "tipo A", "tipo B", "clase B", "licencia B", letra suelta al final)
     tipo_match = re.search(
@@ -245,12 +255,13 @@ def parsear_mensaje(texto: str) -> dict:
     return resultado
 
 
-async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia=None):
+async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia=None, nombre_manual=None):
     """
     Ejecuta el flujo completo del formulario en el portal de la Judicatura a velocidad Turbo (< 3 segundos).
     tipo_denuncia: "cedula" o "licencia"
     tipo_licencia: "A", "B", etc. (solo si tipo_denuncia == "licencia")
-    Retorna (captured_pdf_bytes, nombre_completo)
+    nombre_manual: Nombre y apellido si la plataforma no lo autocompleta desde el Registro Civil.
+    Retorna (captured_pdf_bytes, nombre_completo, info_estado)
     """
     captured_pdf = None
 
@@ -289,6 +300,22 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
     await page.fill("#numeroIdentificacion", cedula)
     await page.locator("#numeroIdentificacion").blur()
 
+    # 2.1 Comprobar si el portal muestra alerta o mensaje de rechazo de cédula
+    error_portal = await page.evaluate("""
+        (() => {
+            const els = document.querySelectorAll('.rf-msgs-sum, .rf-msg-sum, .ui-messages-error, #msjFormulario, .ui-message-error, .alert');
+            for (const el of els) {
+                const txt = (el.innerText || '').trim();
+                if (txt && (txt.toLowerCase().includes('cédula') || txt.toLowerCase().includes('cedula') || txt.toLowerCase().includes('identificación') || txt.toLowerCase().includes('identificacion') || txt.toLowerCase().includes('registro civil') || txt.toLowerCase().includes('no existe') || txt.toLowerCase().includes('inválid') || txt.toLowerCase().includes('incorrect'))) {
+                    return txt;
+                }
+            }
+            return null;
+        })()
+    """)
+    if error_portal:
+        return None, None, {"tipo": "ERROR_CEDULA_PLATAFORMA", "mensaje": error_portal, "cedula": cedula}
+
     # 3. Asignar provincias inmediatamente
     await page.select_option("#provinciaDomicilio", value="17")
     await page.select_option("#provinciaExtravio", value="17")
@@ -324,7 +351,23 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
     await page.select_option("#cantonExtravio", label="QUITO")
     await page.fill("#direccionCircunstancia", dir_circunstancia)
 
-    nombre = await page.input_value("#nombreCompleto") or "CIUDADANO REGISTRADO"
+    # 5.1 Resolver el nombre del ciudadano (automático o manual si la plataforma lo pide)
+    nombre = ""
+    if nombre_manual:
+        await page.fill("#nombreCompleto", nombre_manual.strip().upper())
+        nombre = nombre_manual.strip().upper()
+    else:
+        # Esperar hasta 2 segundos a ver si el Registro Civil autocompleta el nombre
+        for _ in range(5):
+            val = (await page.input_value("#nombreCompleto") or "").strip()
+            if val:
+                nombre = val
+                break
+            await asyncio.sleep(0.4)
+
+        # Si el campo sigue vacío, la plataforma está solicitando los nombres manualmente
+        if not nombre:
+            return None, None, {"tipo": "REQUIERE_NOMBRES", "cedula": cedula}
 
     # 6. Agregar documento
     await page.locator('input[value="+ Agregar un nuevo documento"]').click(force=True)
@@ -488,10 +531,10 @@ async def _ejecutar_formulario(page, context, cedula, dir_domicilio, dir_circuns
         if captured_pdf and captured_pdf.startswith(b"%PDF"):
             break
         await asyncio.sleep(0.3)
-    return captured_pdf, nombre
+    return captured_pdf, nombre, None
 
 
-async def procesar_denuncia_judicial(cedula: str, raw_sector: str, tipo_denuncia: str = "cedula", tipo_licencia: str = None):
+async def procesar_denuncia_judicial(cedula: str, raw_sector: str, tipo_denuncia: str = "cedula", tipo_licencia: str = None, nombre_manual: str = None):
     sector_info = limpiar_y_corregir_sector(raw_sector)
     dir_domicilio = sector_info["direccion_domicilio"]
     dir_circunstancia = sector_info["direccion_circunstancia"]
@@ -506,12 +549,15 @@ async def procesar_denuncia_judicial(cedula: str, raw_sector: str, tipo_denuncia
         )
         page = await context.new_page()
 
-        captured_pdf, nombre = await asyncio.wait_for(
+        captured_pdf, nombre, info_estado = await asyncio.wait_for(
             _ejecutar_formulario(
-                page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia
+                page, context, cedula, dir_domicilio, dir_circunstancia, tipo_denuncia, tipo_licencia, nombre_manual
             ),
             timeout=45.0
         )
+
+        if info_estado and isinstance(info_estado, dict):
+            return False, info_estado, None
 
         if captured_pdf and captured_pdf.startswith(b"%PDF") and len(captured_pdf) > 20000:
             return True, {
@@ -606,14 +652,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text:
         return
-        
+
+    # Si estábamos esperando que el usuario enviara el nombre manual para la denuncia
+    estado_previo = user_states.get(user_id, {})
+    if estado_previo.get("esperando_nombre") and estado_previo.get("cedula"):
+        cedula = estado_previo["cedula"]
+        sector = estado_previo.get("sector") or "QUITO"
+        tipo_denuncia = estado_previo.get("tipo_denuncia", "cedula")
+        tipo_licencia = estado_previo.get("tipo_licencia")
+        nombre_manual = text.strip()
+
+        del user_states[user_id]
+
+        await procesar_y_responder(
+            update,
+            cedula=cedula,
+            sector=sector,
+            tipo_denuncia=tipo_denuncia,
+            tipo_licencia=tipo_licencia,
+            nombre_manual=nombre_manual
+        )
+        return
+
     # Revisa si es flujo Record Policial
     if detectar_mensaje_record(text) or user_states.get(user_id, {}).get("flujo") == "record":
         cedula = parsear_mensaje_record(text) or user_states.get(user_id, {}).get("cedula")
         
         if not cedula:
+            diag = analizar_cedula_con_diagnostico(text)
+            if diag.get("mensaje_error"):
+                await update.message.reply_text(f"👮 **Récord Policial:**\n\n{diag['mensaje_error']}", parse_mode="Markdown")
+                return
             user_states[user_id] = {"flujo": "record"}
-            await update.message.reply_text("Para generar el Récord Policial, por favor indicame el número de **cédula**.", parse_mode="Markdown")
+            await update.message.reply_text("Para generar el Récord Policial, por favor indicame el número de **cédula** (10 dígitos).", parse_mode="Markdown")
             return
             
         if user_id in user_states:
@@ -626,6 +697,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cedula = parsear_mensaje_bachiller(text) or user_states.get(user_id, {}).get("cedula")
         
         if not cedula:
+            diag = analizar_cedula_con_diagnostico(text)
+            if diag.get("mensaje_error"):
+                await update.message.reply_text(f"🎓 **Título de Bachiller:**\n\n{diag['mensaje_error']}", parse_mode="Markdown")
+                return
             user_states[user_id] = {"flujo": "bachiller"}
             await update.message.reply_text("Para consultar el **Título de Bachiller**, por favor indícame el número de **cédula** (10 dígitos).", parse_mode="Markdown")
             return
@@ -642,6 +717,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Parsear el mensaje inteligentemente
     parsed = parsear_mensaje(text)
+
+    # Si hay error explícito de cédula mal tipeada (>10 dígitos, con letras, etc.), avisar de inmediato
+    if parsed.get("error_cedula"):
+        await update.message.reply_text(parsed["error_cedula"], parse_mode="Markdown")
+        return
 
     cedula = parsed["cedula"]
     sector = parsed["sector"]
@@ -718,7 +798,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await procesar_y_responder(update, cedula, sector, tipo_denuncia, tipo_licencia)
 
 
-async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_denuncia: str = "cedula", tipo_licencia: str = None):
+async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_denuncia: str = "cedula", tipo_licencia: str = None, nombre_manual: str = None):
     if tipo_denuncia == "licencia":
         desc_tipo = f"Licencia tipo {tipo_licencia}" if tipo_licencia else "Licencia de conducir"
         emoji_doc = "🪪"
@@ -742,7 +822,7 @@ async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_de
         if time.time() - t0 > TOTAL_TIMEOUT_DENUNCIA:
             break
 
-        success, result, _ = await procesar_denuncia_judicial(cedula, sector, tipo_denuncia, tipo_licencia)
+        success, result, _ = await procesar_denuncia_judicial(cedula, sector, tipo_denuncia, tipo_licencia, nombre_manual)
 
         if success:
             elapsed = time.time() - t0
@@ -784,6 +864,50 @@ async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_de
                 pass
             return
 
+        # 1. Si la plataforma solicita los nombres (porque el Registro Civil no los autocompletó):
+        if isinstance(result, dict) and result.get("tipo") == "REQUIERE_NOMBRES":
+            user_id = update.effective_user.id if update.effective_user else 0
+            user_states[user_id] = {
+                "flujo": "denuncia",
+                "cedula": cedula,
+                "sector": sector,
+                "tipo_denuncia": tipo_denuncia,
+                "tipo_licencia": tipo_licencia,
+                "esperando_nombre": True
+            }
+            msg_pide_nombres = (
+                f"👤 **El portal del Consejo de la Judicatura solicita los nombres.**\n\n"
+                f"🆔 Cédula: `{cedula}`\n\n"
+                f"⚠️ El sistema no pudo consultar automáticamente el nombre en el Registro Civil.\n\n"
+                f"✍️ *Por favor responde directamente a este mensaje con los **Nombres y Apellidos completos** del titular.*"
+            )
+            try:
+                await msg_espera.edit_text(msg_pide_nombres, parse_mode="Markdown")
+            except Exception:
+                try:
+                    await update.message.reply_text(msg_pide_nombres, parse_mode="Markdown")
+                except Exception:
+                    pass
+            return
+
+        # 2. Si la plataforma rechazó la cédula (cédula inválida o no registrada):
+        if isinstance(result, dict) and result.get("tipo") == "ERROR_CEDULA_PLATAFORMA":
+            detalle = result.get("mensaje", "Número de cédula no válido")
+            msg_err_portal = (
+                f"❌ **Cédula rechazada por el Consejo de la Judicatura**\n\n"
+                f"🆔 Cédula: `{cedula}`\n"
+                f"⚠️ **Mensaje del portal:** {detalle}\n\n"
+                f"💡 *Por favor verifica que el número de cédula esté bien escrito e inténtalo de nuevo.*"
+            )
+            try:
+                await msg_espera.edit_text(msg_err_portal, parse_mode="Markdown")
+            except Exception:
+                try:
+                    await update.message.reply_text(msg_err_portal, parse_mode="Markdown")
+                except Exception:
+                    pass
+            return
+
         if isinstance(result, str):
             ultimo_error = result
 
@@ -794,17 +918,17 @@ async def procesar_y_responder(update: Update, cedula: str, sector: str, tipo_de
                     f"{emoji_doc} Documento: `{desc_tipo}`\n"
                     f"🆔 Cédula: `{cedula}`\n"
                     f"📍 Sector: `{sector}`\n\n"
-                    f"🔄 *Reintentando automáticamente (intento {intento + 1} de {MAX_RETRIES_DENUNCIA})...*",
+                    f"🔄 *Reintentando automáticamente (prueba {intento + 1} de {MAX_RETRIES_DENUNCIA})...*",
                     parse_mode="Markdown"
                 )
             except Exception:
                 pass
             await asyncio.sleep(2)
 
-    # Si no se logró tras agotar los intentos:
+    # Si no se logró tras agotar las 15 pruebas:
     tiempo_total = time.time() - t0
     mensaje_fallo = (
-        f"❌ **No se pudo generar la denuncia en este momento.** ({tiempo_total:.1f}s)\n\n"
+        f"❌ **No se pudo generar la denuncia tras {MAX_RETRIES_DENUNCIA} pruebas.** ({tiempo_total:.1f}s)\n\n"
         f"🆔 Cédula: `{cedula}`\n"
         f"⚠️ **Motivo:** El portal del Consejo de la Judicatura no respondió a tiempo o presentó saturación.\n\n"
         f"💡 **Recomendación:**\n"
